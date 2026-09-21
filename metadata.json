@@ -1,0 +1,6 @@
+{
+  "name": "Axiom Content Agent",
+  "description": "Production-ready autonomous AI Content Agent with 12-stage pipeline, Tavily research, Blogger publishing, and social distribution.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
