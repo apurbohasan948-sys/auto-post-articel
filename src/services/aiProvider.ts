@@ -6,6 +6,7 @@
 
 import { GoogleGenAI } from '@google/genai';
 import { AIProviderConfig } from '../types/agent.ts';
+import { decryptSecret } from './encryption.ts';
 import { StorageService } from './storage.ts';
 
 export interface PromptPayload {
@@ -129,8 +130,8 @@ export class AIProviderManager {
   }
 
   private async callGemini(provider: AIProviderConfig, payload: PromptPayload): Promise<string> {
-    const apiKey = provider.apiKey || process.env.GEMINI_API_KEY;
-    if (!apiKey) {
+    const rawApiKey = decryptSecret(provider.apiKey) || process.env.GEMINI_API_KEY;
+    if (!rawApiKey) {
       throw new Error('Missing Gemini API Key. Provide it in AI Providers or GEMINI_API_KEY environment variable.');
     }
 
@@ -160,7 +161,8 @@ export class AIProviderManager {
     provider: AIProviderConfig,
     payload: PromptPayload
   ): Promise<string> {
-    if (!provider.apiKey) {
+    const rawApiKey = decryptSecret(provider.apiKey);
+    if (!rawApiKey) {
       throw new Error(`Missing API Key for [${provider.name}]. Configure it in settings or environment.`);
     }
 
@@ -170,7 +172,9 @@ export class AIProviderManager {
     let attempt = 0;
     let lastError: Error | null = null;
 
-    while (attempt < provider.maxRetries) {
+    const maxRetries = provider.maxRetries ?? 2;
+
+    while (attempt < maxRetries) {
       attempt++;
       try {
         const controller = new AbortController();
@@ -178,7 +182,7 @@ export class AIProviderManager {
 
         const headers: Record<string, string> = {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${provider.apiKey}`,
+          Authorization: `Bearer ${rawApiKey}`,
         };
 
         if (provider.type === 'openrouter') {
@@ -226,14 +230,14 @@ export class AIProviderManager {
         return content;
       } catch (err: unknown) {
         lastError = err instanceof Error ? err : new Error(String(err));
-        if (attempt < provider.maxRetries) {
+        if (attempt < maxRetries) {
           const delay = Math.pow(2, attempt) * 1000;
           await new Promise((resolve) => setTimeout(resolve, delay));
         }
       }
     }
 
-    throw lastError || new Error(`Failed after ${provider.maxRetries} attempts`);
+    throw lastError || new Error(`Failed after ${maxRetries} attempts`);
   }
 
   private cleanAndParseJSON<T>(raw: string): T {

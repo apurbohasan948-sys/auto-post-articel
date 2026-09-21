@@ -5,6 +5,7 @@
  */
 
 import { ResearchPackage, ResearchSource, SearchProviderConfig } from '../types/agent.ts';
+import { decryptSecret } from './encryption.ts';
 import { StorageService } from './storage.ts';
 
 export interface SearchResultItem {
@@ -109,15 +110,15 @@ export class SearchProviderManager {
   }
 
   private async queryTavily(provider: SearchProviderConfig, query: string): Promise<SearchResultItem[]> {
-    const apiKey = provider.apiKey || process.env.TAVILY_API_KEY;
-    if (!apiKey) {
+    const rawApiKey = decryptSecret(provider.apiKey) || process.env.TAVILY_API_KEY;
+    if (!rawApiKey) {
       throw new Error('Missing TAVILY_API_KEY. Configure it in Search Providers or environment.');
     }
 
     const endpoint = `${(provider.baseUrl || 'https://api.tavily.com').replace(/\/+$/, '')}/search`;
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 25000);
+    const timeout = setTimeout(() => controller.abort(), provider.timeoutMs || 25000);
 
     const res = await fetch(endpoint, {
       method: 'POST',
@@ -125,11 +126,12 @@ export class SearchProviderManager {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        api_key: apiKey,
+        api_key: rawApiKey,
         query,
-        search_depth: 'advanced',
+        search_depth: provider.searchDepth || 'advanced',
         include_answer: true,
-        max_results: 6,
+        max_results: provider.maxResults || 6,
+        topic: provider.topic || 'general',
       }),
       signal: controller.signal,
     });

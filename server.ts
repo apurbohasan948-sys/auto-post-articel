@@ -11,6 +11,8 @@ import { AnalyticsMonitorAgent } from './src/agents/AnalyticsMonitorAgent.ts';
 import { BloggerPublisherAgent } from './src/agents/BloggerPublisherAgent.ts';
 import { Orchestrator } from './src/agents/Orchestrator.ts';
 import { TopicScoutAgent } from './src/agents/TopicScoutAgent.ts';
+import { decryptSecret, encryptSecret, maskApiKey } from './src/services/encryption.ts';
+import { ProviderTestingService } from './src/services/providerTestingService.ts';
 import { StorageService } from './src/services/storage.ts';
 
 const app = express();
@@ -23,6 +25,7 @@ const orchestrator = Orchestrator.getInstance();
 const analytics = new AnalyticsMonitorAgent();
 const scout = new TopicScoutAgent();
 const bloggerAgent = new BloggerPublisherAgent();
+const testingService = ProviderTestingService.getInstance();
 
 // --- 1. Agent Lifecycle & Controls ---
 
@@ -190,27 +193,166 @@ app.put('/api/settings', (req: Request, res: Response) => {
   res.json({ success: true, settings: updated });
 });
 
-app.get('/api/providers/ai', (req: Request, res: Response) => {
-  // Mask secret keys for safe frontend display
-  const providers = storage.getAIProviders().map((p) => ({
+// --- 7. API Control Center: AI & Search Providers ---
+
+// Helper to mask provider lists for safe frontend delivery
+function getMaskedAIProviders() {
+  return storage.getAIProviders().map((p) => ({
     ...p,
-    apiKey: p.apiKey ? `***${p.apiKey.slice(-4)}` : '',
+    apiKey: maskApiKey(p.apiKey),
     hasKey: Boolean(p.apiKey),
   }));
-  res.json({ providers });
+}
+
+function getMaskedSearchProviders() {
+  return storage.getSearchProviders().map((p) => ({
+    ...p,
+    apiKey: maskApiKey(p.apiKey),
+    hasKey: Boolean(p.apiKey),
+  }));
+}
+
+// 7.1 AI Providers
+app.get('/api/providers/ai', (req: Request, res: Response) => {
+  res.json({ providers: getMaskedAIProviders() });
 });
 
+app.post('/api/providers/ai/save', (req: Request, res: Response) => {
+  const { provider } = req.body;
+  if (!provider || !provider.name) {
+    return res.status(400).json({ error: 'Invalid provider payload' });
+  }
+
+  const existing = storage.getAIProviders().find((p) => p.id === provider.id);
+  let finalKey = provider.apiKey;
+
+  // If user entered a new unmasked key, encrypt it
+  if (finalKey && !finalKey.includes('••••')) {
+    finalKey = encryptSecret(finalKey);
+  } else {
+    // Preserve existing encrypted/stored key
+    finalKey = existing?.apiKey || '';
+  }
+
+  const saved = storage.saveAIProvider({
+    ...provider,
+    apiKey: finalKey,
+    hasKey: Boolean(finalKey),
+  });
+
+  res.json({
+    success: true,
+    provider: {
+      ...saved,
+      apiKey: maskApiKey(saved.apiKey),
+      hasKey: Boolean(saved.apiKey),
+    },
+  });
+});
+
+app.delete('/api/providers/ai/:id', (req: Request, res: Response) => {
+  const success = storage.deleteAIProvider(req.params.id);
+  res.json({ success });
+});
+
+app.post('/api/providers/ai/reorder', (req: Request, res: Response) => {
+  const { ids } = req.body;
+  if (!Array.isArray(ids)) return res.status(400).json({ error: 'ids array required' });
+  storage.reorderAIProviders(ids);
+  res.json({ success: true, providers: getMaskedAIProviders() });
+});
+
+app.post('/api/providers/ai/toggle', (req: Request, res: Response) => {
+  const { id, enabled } = req.body;
+  const updated = storage.toggleAIProvider(id, Boolean(enabled));
+  res.json({ success: Boolean(updated), provider: updated });
+});
+
+app.post('/api/providers/ai/test', async (req: Request, res: Response) => {
+  try {
+    const { providerId, provider } = req.body;
+    let targetProvider = provider;
+
+    if (providerId) {
+      targetProvider = storage.getAIProviders().find((p) => p.id === providerId);
+    }
+
+    if (!targetProvider) {
+      return res.status(404).json({ success: false, error: 'Provider not found' });
+    }
+
+    // If key is masked in incoming payload, resolve from storage
+    if (targetProvider.apiKey && targetProvider.apiKey.includes('••••')) {
+      const stored = storage.getAIProviders().find((p) => p.id === targetProvider.id);
+      if (stored) targetProvider.apiKey = stored.apiKey;
+    }
+
+    const testResult = await testingService.testAIProvider(targetProvider);
+    res.json(testResult);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, error: msg });
+  }
+});
+
+app.post('/api/providers/ai/playground', async (req: Request, res: Response) => {
+  try {
+    const { providerId, provider, prompt } = req.body;
+    let targetProvider = provider;
+
+    if (providerId) {
+      targetProvider = storage.getAIProviders().find((p) => p.id === providerId);
+    }
+
+    if (!targetProvider) {
+      return res.status(404).json({ success: false, error: 'Provider not found' });
+    }
+
+    if (targetProvider.apiKey && targetProvider.apiKey.includes('••••')) {
+      const stored = storage.getAIProviders().find((p) => p.id === targetProvider.id);
+      if (stored) targetProvider.apiKey = stored.apiKey;
+    }
+
+    const result = await testingService.testAIProvider(
+      targetProvider,
+      prompt || 'Write one short sentence about technology.'
+    );
+    res.json(result);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, error: msg });
+  }
+});
+
+app.get('/api/providers/ai/:id/usage', async (req: Request, res: Response) => {
+  const p = storage.getAIProviders().find((item) => item.id === req.params.id);
+  if (!p) return res.status(404).json({ error: 'Provider not found' });
+
+  if (p.type === 'openrouter' && p.apiKey) {
+    const raw = decryptSecret(p.apiKey);
+    const usage = await testingService.fetchOpenRouterUsage(raw);
+    return res.json({ success: true, usageInfo: usage });
+  }
+
+  res.json({
+    success: true,
+    usageInfo: p.usageInfo || { hasUsageData: false, message: 'Usage information unavailable' },
+  });
+});
+
+// Legacy PUT support for backward compatibility
 app.put('/api/providers/ai', (req: Request, res: Response) => {
   const incoming = req.body.providers;
   if (!Array.isArray(incoming)) return res.status(400).json({ error: 'Invalid providers array' });
   const current = storage.getAIProviders();
 
-  // Merge keys if masked
   const updated = incoming.map((inc) => {
     const existing = current.find((c) => c.id === inc.id);
     let key = inc.apiKey;
-    if (key && key.startsWith('***')) {
+    if (key && key.includes('••••')) {
       key = existing?.apiKey || '';
+    } else if (key && !key.startsWith('enc:v1:')) {
+      key = encryptSecret(key);
     }
     return { ...inc, apiKey: key };
   });
@@ -219,15 +361,118 @@ app.put('/api/providers/ai', (req: Request, res: Response) => {
   res.json({ success: true });
 });
 
+// 7.2 Search / Research Providers
 app.get('/api/providers/search', (req: Request, res: Response) => {
-  const providers = storage.getSearchProviders().map((p) => ({
-    ...p,
-    apiKey: p.apiKey ? `***${p.apiKey.slice(-4)}` : '',
-    hasKey: Boolean(p.apiKey),
-  }));
-  res.json({ providers });
+  res.json({ providers: getMaskedSearchProviders() });
 });
 
+app.post('/api/providers/search/save', (req: Request, res: Response) => {
+  const { provider } = req.body;
+  if (!provider || !provider.name) {
+    return res.status(400).json({ error: 'Invalid search provider payload' });
+  }
+
+  const existing = storage.getSearchProviders().find((p) => p.id === provider.id);
+  let finalKey = provider.apiKey;
+
+  if (finalKey && !finalKey.includes('••••')) {
+    finalKey = encryptSecret(finalKey);
+  } else {
+    finalKey = existing?.apiKey || '';
+  }
+
+  const saved = storage.saveSearchProvider({
+    ...provider,
+    apiKey: finalKey,
+    hasKey: Boolean(finalKey),
+  });
+
+  res.json({
+    success: true,
+    provider: {
+      ...saved,
+      apiKey: maskApiKey(saved.apiKey),
+      hasKey: Boolean(saved.apiKey),
+    },
+  });
+});
+
+app.delete('/api/providers/search/:id', (req: Request, res: Response) => {
+  const success = storage.deleteSearchProvider(req.params.id);
+  res.json({ success });
+});
+
+app.post('/api/providers/search/reorder', (req: Request, res: Response) => {
+  const { ids } = req.body;
+  if (!Array.isArray(ids)) return res.status(400).json({ error: 'ids array required' });
+  storage.reorderSearchProviders(ids);
+  res.json({ success: true, providers: getMaskedSearchProviders() });
+});
+
+app.post('/api/providers/search/toggle', (req: Request, res: Response) => {
+  const { id, enabled } = req.body;
+  const updated = storage.toggleSearchProvider(id, Boolean(enabled));
+  res.json({ success: Boolean(updated), provider: updated });
+});
+
+app.post('/api/providers/search/test', async (req: Request, res: Response) => {
+  try {
+    const { providerId, provider } = req.body;
+    let targetProvider = provider;
+
+    if (providerId) {
+      targetProvider = storage.getSearchProviders().find((p) => p.id === providerId);
+    }
+
+    if (!targetProvider) {
+      return res.status(404).json({ success: false, error: 'Search provider not found' });
+    }
+
+    if (targetProvider.apiKey && targetProvider.apiKey.includes('••••')) {
+      const stored = storage.getSearchProviders().find((p) => p.id === targetProvider.id);
+      if (stored) targetProvider.apiKey = stored.apiKey;
+    }
+
+    const testResult = await testingService.testSearchProvider(targetProvider, 'ai agent verification ping', 'basic', 3);
+    res.json(testResult);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, error: msg });
+  }
+});
+
+app.post('/api/providers/search/playground', async (req: Request, res: Response) => {
+  try {
+    const { providerId, provider, query, depth, maxResults } = req.body;
+    let targetProvider = provider;
+
+    if (providerId) {
+      targetProvider = storage.getSearchProviders().find((p) => p.id === providerId);
+    }
+
+    if (!targetProvider) {
+      return res.status(404).json({ success: false, error: 'Search provider not found' });
+    }
+
+    if (targetProvider.apiKey && targetProvider.apiKey.includes('••••')) {
+      const stored = storage.getSearchProviders().find((p) => p.id === targetProvider.id);
+      if (stored) targetProvider.apiKey = stored.apiKey;
+    }
+
+    const result = await testingService.testSearchProvider(
+      targetProvider,
+      query || 'latest artificial intelligence trends',
+      depth || 'basic',
+      maxResults || 5
+    );
+    res.json(result);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, error: msg });
+  }
+});
+
+// Legacy search PUT support
 app.put('/api/providers/search', (req: Request, res: Response) => {
   const incoming = req.body.providers;
   if (!Array.isArray(incoming)) return res.status(400).json({ error: 'Invalid providers array' });
@@ -236,14 +481,89 @@ app.put('/api/providers/search', (req: Request, res: Response) => {
   const updated = incoming.map((inc) => {
     const existing = current.find((c) => c.id === inc.id);
     let key = inc.apiKey;
-    if (key && key.startsWith('***')) {
+    if (key && key.includes('••••')) {
       key = existing?.apiKey || '';
+    } else if (key && !key.startsWith('enc:v1:')) {
+      key = encryptSecret(key);
     }
     return { ...inc, apiKey: key };
   });
 
   storage.updateSearchProviders(updated);
   res.json({ success: true });
+});
+
+// 7.3 Test History & Global Health
+app.get('/api/providers/test-history', (req: Request, res: Response) => {
+  const limit = req.query.limit ? Number(req.query.limit) : 25;
+  res.json({ history: storage.getTestHistory(limit) });
+});
+
+app.get('/api/providers/health', (req: Request, res: Response) => {
+  const aiList = storage.getAIProviders();
+  const searchList = storage.getSearchProviders();
+  const bloggerCfg = storage.getBloggerConfig();
+
+  const primaryAI = aiList.filter((p) => p.enabled).sort((a, b) => a.priority - b.priority)[0];
+  const primarySearch = searchList.filter((p) => p.enabled).sort((a, b) => a.priority - b.priority)[0];
+
+  res.json({
+    timestamp: new Date().toISOString(),
+    primaryAI: primaryAI ? { id: primaryAI.id, name: primaryAI.name, model: primaryAI.modelName } : null,
+    primarySearch: primarySearch ? { id: primarySearch.id, name: primarySearch.name } : null,
+    aiProviders: aiList.map((p) => ({
+      id: p.id,
+      name: p.name,
+      type: p.type,
+      model: p.modelName,
+      priority: p.priority,
+      enabled: p.enabled,
+      hasKey: Boolean(p.apiKey),
+      status: p.lastTestStatus || 'NEVER_TESTED',
+      latencyMs: p.lastLatencyMs,
+      lastTestedAt: p.lastTestedAt,
+      error: p.lastError,
+    })),
+    searchProviders: searchList.map((p) => ({
+      id: p.id,
+      name: p.name,
+      type: p.type,
+      priority: p.priority,
+      enabled: p.enabled,
+      hasKey: Boolean(p.apiKey),
+      status: p.lastTestStatus || 'NEVER_TESTED',
+      latencyMs: p.lastLatencyMs,
+      lastTestedAt: p.lastTestedAt,
+      error: p.lastError,
+    })),
+    blogger: {
+      isConnected: bloggerCfg.isConnected || Boolean(process.env.BLOGGER_REFRESH_TOKEN),
+      blogName: bloggerCfg.blogName,
+      blogUrl: bloggerCfg.blogUrl,
+      mode: bloggerCfg.publishingMode,
+    },
+    social: {
+      facebook: Boolean(process.env.FACEBOOK_PAGE_ACCESS_TOKEN),
+      telegram: Boolean(process.env.TELEGRAM_BOT_TOKEN),
+      linkedin: Boolean(process.env.LINKEDIN_ACCESS_TOKEN),
+      x: Boolean(process.env.X_ACCESS_TOKEN),
+      threads: Boolean(process.env.THREADS_ACCESS_TOKEN),
+    },
+  });
+});
+
+// 7.4 Import & Export Configuration
+app.get('/api/providers/export', (req: Request, res: Response) => {
+  const includeSecrets = req.query.includeSecrets === 'true';
+  const exported = storage.exportConfiguration(includeSecrets);
+  res.json(exported);
+});
+
+app.post('/api/providers/import', (req: Request, res: Response) => {
+  const { config } = req.body;
+  if (!config) return res.status(400).json({ error: 'Missing configuration payload' });
+  const result = storage.importConfiguration(config);
+  res.json(result);
 });
 
 // --- 8. Blogger & Social Settings ---

@@ -10,6 +10,7 @@ import {
   AgentJob,
   AgentMemory,
   AIProviderConfig,
+  ApiTestHistoryItem,
   Article,
   ResearchPackage,
   SearchProviderConfig,
@@ -22,6 +23,7 @@ interface StoreData {
   settings: SystemSettings;
   aiProviders: AIProviderConfig[];
   searchProviders: SearchProviderConfig[];
+  testHistory: ApiTestHistoryItem[];
   topics: TopicCandidate[];
   researchPackages: Record<string, ResearchPackage>;
   articles: Article[];
@@ -96,6 +98,9 @@ const DEFAULT_AI_PROVIDERS: AIProviderConfig[] = [
     enabled: true,
     timeoutMs: 45000,
     maxRetries: 3,
+    lastTestStatus: 'NEVER_TESTED',
+    createdAt: new Date(Date.now() - 3600000 * 24).toISOString(),
+    updatedAt: new Date().toISOString(),
   },
   {
     id: 'prov_gemini',
@@ -108,6 +113,11 @@ const DEFAULT_AI_PROVIDERS: AIProviderConfig[] = [
     enabled: true,
     timeoutMs: 30000,
     maxRetries: 3,
+    lastTestedAt: new Date(Date.now() - 1800000).toISOString(),
+    lastTestStatus: 'SUCCESS',
+    lastLatencyMs: 980,
+    createdAt: new Date(Date.now() - 3600000 * 24).toISOString(),
+    updatedAt: new Date().toISOString(),
   },
   {
     id: 'prov_custom_1',
@@ -120,6 +130,9 @@ const DEFAULT_AI_PROVIDERS: AIProviderConfig[] = [
     enabled: false,
     timeoutMs: 45000,
     maxRetries: 2,
+    lastTestStatus: 'NEVER_TESTED',
+    createdAt: new Date(Date.now() - 3600000 * 24).toISOString(),
+    updatedAt: new Date().toISOString(),
   },
 ];
 
@@ -130,8 +143,15 @@ const DEFAULT_SEARCH_PROVIDERS: SearchProviderConfig[] = [
     type: 'tavily',
     apiKey: process.env.TAVILY_API_KEY || '',
     baseUrl: process.env.TAVILY_BASE_URL || 'https://api.tavily.com',
+    searchDepth: 'advanced',
+    maxResults: 6,
+    topic: 'general',
+    timeoutMs: 25000,
     priority: 1,
     enabled: true,
+    lastTestStatus: 'NEVER_TESTED',
+    createdAt: new Date(Date.now() - 3600000 * 24).toISOString(),
+    updatedAt: new Date().toISOString(),
   },
   {
     id: 'search_fallback',
@@ -139,8 +159,43 @@ const DEFAULT_SEARCH_PROVIDERS: SearchProviderConfig[] = [
     type: 'custom',
     apiKey: '',
     baseUrl: 'https://api.crossref.org',
+    searchDepth: 'basic',
+    maxResults: 5,
+    timeoutMs: 20000,
     priority: 2,
     enabled: true,
+    lastTestedAt: new Date(Date.now() - 3600000).toISOString(),
+    lastTestStatus: 'SUCCESS',
+    lastLatencyMs: 640,
+    createdAt: new Date(Date.now() - 3600000 * 24).toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+];
+
+const SEED_TEST_HISTORY: ApiTestHistoryItem[] = [
+  {
+    id: 'test_seed_01',
+    providerId: 'prov_gemini',
+    providerName: 'Gemini 3.8 Flash (Built-in)',
+    providerType: 'ai',
+    modelOrQuery: 'gemini-3.8-flash',
+    timestamp: new Date(Date.now() - 1800000).toISOString(),
+    result: 'SUCCESS',
+    latencyMs: 980,
+    httpStatus: 200,
+    summary: 'Model gemini-3.8-flash verified response in 980ms',
+  },
+  {
+    id: 'test_seed_02',
+    providerId: 'search_fallback',
+    providerName: 'Academic & Tech Documentation Index',
+    providerType: 'search',
+    modelOrQuery: 'autonomous agent state machines',
+    timestamp: new Date(Date.now() - 3600000).toISOString(),
+    result: 'SUCCESS',
+    latencyMs: 640,
+    httpStatus: 200,
+    summary: 'Verified connection, returned 5 academic indexing records',
   },
 ];
 
@@ -589,6 +644,7 @@ export class StorageService {
       if (fs.existsSync(this.dataFilePath)) {
         const raw = fs.readFileSync(this.dataFilePath, 'utf-8');
         const parsed = JSON.parse(raw) as StoreData;
+        parsed.testHistory = parsed.testHistory || [];
         this.memoryCache = parsed;
         return parsed;
       }
@@ -601,6 +657,7 @@ export class StorageService {
       settings: DEFAULT_SETTINGS,
       aiProviders: DEFAULT_AI_PROVIDERS,
       searchProviders: DEFAULT_SEARCH_PROVIDERS,
+      testHistory: SEED_TEST_HISTORY,
       topics: SEED_TOPICS,
       researchPackages: SEED_RESEARCH,
       articles: SEED_ARTICLES,
@@ -702,6 +759,90 @@ export class StorageService {
     return store.aiProviders;
   }
 
+  public saveAIProvider(provider: AIProviderConfig): AIProviderConfig {
+    const store = this.load();
+    const index = store.aiProviders.findIndex((p) => p.id === provider.id);
+    const now = new Date().toISOString();
+
+    if (index >= 0) {
+      const existing = store.aiProviders[index];
+      // Keep existing key if not updated
+      const updatedKey = provider.apiKey ? provider.apiKey : existing.apiKey;
+      store.aiProviders[index] = {
+        ...existing,
+        ...provider,
+        apiKey: updatedKey,
+        updatedAt: now,
+      };
+    } else {
+      const newProvider: AIProviderConfig = {
+        ...provider,
+        id: provider.id || `prov_${Date.now()}`,
+        priority: provider.priority || store.aiProviders.length + 1,
+        createdAt: now,
+        updatedAt: now,
+      };
+      store.aiProviders.push(newProvider);
+    }
+
+    // Sort by priority
+    store.aiProviders.sort((a, b) => a.priority - b.priority);
+    this.persist(store);
+    return store.aiProviders.find((p) => p.id === provider.id) || provider;
+  }
+
+  public deleteAIProvider(id: string): boolean {
+    const store = this.load();
+    const initialLen = store.aiProviders.length;
+    store.aiProviders = store.aiProviders.filter((p) => p.id !== id);
+    if (store.aiProviders.length !== initialLen) {
+      // Re-index priorities 1..N
+      store.aiProviders.forEach((p, idx) => {
+        p.priority = idx + 1;
+      });
+      this.persist(store);
+      return true;
+    }
+    return false;
+  }
+
+  public reorderAIProviders(ids: string[]): AIProviderConfig[] {
+    const store = this.load();
+    const map = new Map(store.aiProviders.map((p) => [p.id, p]));
+    const reordered: AIProviderConfig[] = [];
+
+    ids.forEach((id, index) => {
+      const item = map.get(id);
+      if (item) {
+        item.priority = index + 1;
+        reordered.push(item);
+        map.delete(id);
+      }
+    });
+
+    // Append any remaining
+    map.forEach((item) => {
+      item.priority = reordered.length + 1;
+      reordered.push(item);
+    });
+
+    store.aiProviders = reordered;
+    this.persist(store);
+    return store.aiProviders;
+  }
+
+  public toggleAIProvider(id: string, enabled: boolean): AIProviderConfig | null {
+    const store = this.load();
+    const provider = store.aiProviders.find((p) => p.id === id);
+    if (provider) {
+      provider.enabled = enabled;
+      provider.updatedAt = new Date().toISOString();
+      this.persist(store);
+      return provider;
+    }
+    return null;
+  }
+
   public getSearchProviders(): SearchProviderConfig[] {
     return this.load().searchProviders;
   }
@@ -711,6 +852,178 @@ export class StorageService {
     store.searchProviders = providers;
     this.persist(store);
     return store.searchProviders;
+  }
+
+  public saveSearchProvider(provider: SearchProviderConfig): SearchProviderConfig {
+    const store = this.load();
+    const index = store.searchProviders.findIndex((p) => p.id === provider.id);
+    const now = new Date().toISOString();
+
+    if (index >= 0) {
+      const existing = store.searchProviders[index];
+      const updatedKey = provider.apiKey ? provider.apiKey : existing.apiKey;
+      store.searchProviders[index] = {
+        ...existing,
+        ...provider,
+        apiKey: updatedKey,
+        updatedAt: now,
+      };
+    } else {
+      const newProvider: SearchProviderConfig = {
+        ...provider,
+        id: provider.id || `search_${Date.now()}`,
+        priority: provider.priority || store.searchProviders.length + 1,
+        createdAt: now,
+        updatedAt: now,
+      };
+      store.searchProviders.push(newProvider);
+    }
+
+    store.searchProviders.sort((a, b) => a.priority - b.priority);
+    this.persist(store);
+    return store.searchProviders.find((p) => p.id === provider.id) || provider;
+  }
+
+  public deleteSearchProvider(id: string): boolean {
+    const store = this.load();
+    const initialLen = store.searchProviders.length;
+    store.searchProviders = store.searchProviders.filter((p) => p.id !== id);
+    if (store.searchProviders.length !== initialLen) {
+      store.searchProviders.forEach((p, idx) => {
+        p.priority = idx + 1;
+      });
+      this.persist(store);
+      return true;
+    }
+    return false;
+  }
+
+  public reorderSearchProviders(ids: string[]): SearchProviderConfig[] {
+    const store = this.load();
+    const map = new Map(store.searchProviders.map((p) => [p.id, p]));
+    const reordered: SearchProviderConfig[] = [];
+
+    ids.forEach((id, index) => {
+      const item = map.get(id);
+      if (item) {
+        item.priority = index + 1;
+        reordered.push(item);
+        map.delete(id);
+      }
+    });
+
+    map.forEach((item) => {
+      item.priority = reordered.length + 1;
+      reordered.push(item);
+    });
+
+    store.searchProviders = reordered;
+    this.persist(store);
+    return store.searchProviders;
+  }
+
+  public toggleSearchProvider(id: string, enabled: boolean): SearchProviderConfig | null {
+    const store = this.load();
+    const provider = store.searchProviders.find((p) => p.id === id);
+    if (provider) {
+      provider.enabled = enabled;
+      provider.updatedAt = new Date().toISOString();
+      this.persist(store);
+      return provider;
+    }
+    return null;
+  }
+
+  // --- Test History ---
+  public getTestHistory(limit = 20): ApiTestHistoryItem[] {
+    const store = this.load();
+    const history = store.testHistory || [];
+    return history.slice(0, limit);
+  }
+
+  public addTestHistory(item: ApiTestHistoryItem): void {
+    const store = this.load();
+    if (!store.testHistory) {
+      store.testHistory = [];
+    }
+    store.testHistory.unshift(item);
+    if (store.testHistory.length > 50) {
+      store.testHistory = store.testHistory.slice(0, 50);
+    }
+    this.persist(store);
+  }
+
+  // --- Import / Export ---
+  public exportConfiguration(includeSecrets: boolean = false) {
+    const store = this.load();
+    return {
+      version: '1.0',
+      exportedAt: new Date().toISOString(),
+      includeSecrets,
+      aiProviders: store.aiProviders.map((p) => ({
+        ...p,
+        apiKey: includeSecrets ? p.apiKey : '',
+      })),
+      searchProviders: store.searchProviders.map((p) => ({
+        ...p,
+        apiKey: includeSecrets ? p.apiKey : '',
+      })),
+      settings: {
+        niche: store.settings.niche,
+        contentNiche: store.settings.contentNiche,
+        subNiches: store.settings.subNiches,
+        targetAudience: store.settings.targetAudience,
+        language: store.settings.language,
+        articleFrequencyPerDay: store.settings.articleFrequencyPerDay,
+        mode: store.settings.mode,
+      },
+    };
+  }
+
+  public importConfiguration(config: any): { success: boolean; aiCount: number; searchCount: number } {
+    const store = this.load();
+    let aiCount = 0;
+    let searchCount = 0;
+
+    if (Array.isArray(config.aiProviders)) {
+      const currentMap = new Map(store.aiProviders.map((p) => [p.id, p]));
+      config.aiProviders.forEach((inc: AIProviderConfig) => {
+        const existing = currentMap.get(inc.id);
+        const finalKey = inc.apiKey || existing?.apiKey || '';
+        currentMap.set(inc.id, {
+          ...inc,
+          apiKey: finalKey,
+          updatedAt: new Date().toISOString(),
+        });
+        aiCount++;
+      });
+      store.aiProviders = Array.from(currentMap.values()).sort((a, b) => a.priority - b.priority);
+    }
+
+    if (Array.isArray(config.searchProviders)) {
+      const currentMap = new Map(store.searchProviders.map((p) => [p.id, p]));
+      config.searchProviders.forEach((inc: SearchProviderConfig) => {
+        const existing = currentMap.get(inc.id);
+        const finalKey = inc.apiKey || existing?.apiKey || '';
+        currentMap.set(inc.id, {
+          ...inc,
+          apiKey: finalKey,
+          updatedAt: new Date().toISOString(),
+        });
+        searchCount++;
+      });
+      store.searchProviders = Array.from(currentMap.values()).sort((a, b) => a.priority - b.priority);
+    }
+
+    if (config.settings) {
+      store.settings = {
+        ...store.settings,
+        ...config.settings,
+      };
+    }
+
+    this.persist(store);
+    return { success: true, aiCount, searchCount };
   }
 
   // --- Topics ---

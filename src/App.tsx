@@ -432,6 +432,7 @@ export default function App() {
           <SettingsView
             settings={settings}
             onUpdateSettings={handleUpdateSettings}
+            onNavigateToProviders={() => setActiveTab('providers')}
           />
         )}
       </main>

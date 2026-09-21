@@ -8,17 +8,20 @@ import {
   Globe,
   Sliders,
   AlertTriangle,
+  Cpu,
 } from 'lucide-react';
 import { SystemSettings } from '../types/agent.ts';
 
 interface SettingsViewProps {
   settings: SystemSettings;
   onUpdateSettings: (settings: Partial<SystemSettings>) => void;
+  onNavigateToProviders?: () => void;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   settings,
   onUpdateSettings,
+  onNavigateToProviders,
 }) => {
   const [formData, setFormData] = useState<SystemSettings>(settings);
   const [isSaved, setIsSaved] = useState(false);
@@ -64,6 +67,33 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* API Control Center Banner Link */}
+      {onNavigateToProviders && (
+        <div className="cyber-panel p-4 rounded-xl border border-cyan-500/30 bg-cyan-950/20 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-lg bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 flex-shrink-0">
+              <Cpu className="w-5 h-5" />
+            </div>
+            <div>
+              <h4 className="text-xs font-bold text-white font-mono uppercase tracking-wider">
+                Looking for API Keys & LLM Providers?
+              </h4>
+              <p className="text-[11px] text-slate-400">
+                Manage, add, test, and prioritize OpenRouter, Gemini, OpenAI-compatible models, and Tavily search in the dedicated API Control Center.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onNavigateToProviders}
+            className="px-3.5 py-1.5 rounded-lg text-xs font-bold font-mono text-white bg-cyan-600 hover:bg-cyan-500 transition-colors flex items-center gap-1.5 shadow-md cursor-pointer self-start sm:self-auto whitespace-nowrap"
+          >
+            <span>Open API Control Center</span>
+            <span>&rarr;</span>
+          </button>
+        </div>
+      )}
 
       <form onSubmit={handleSubmit} className="space-y-6">
         {/* 1. Editorial Core */}

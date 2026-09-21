@@ -213,29 +213,141 @@ export interface Article {
   updatedAt: string;
 }
 
+export type ProviderTestStatus = 'SUCCESS' | 'FAILED' | 'TIMEOUT' | 'RATE_LIMITED' | 'NEVER_TESTED';
+
+export interface ProviderUsageInfo {
+  requestsToday?: number;
+  tokensToday?: number;
+  remainingQuota?: string | number;
+  rateLimit?: string | number;
+  resetTime?: string;
+  hasUsageData: boolean;
+  message?: string;
+  usage?: number;
+  limit?: number;
+  isFreeTier?: boolean;
+}
+
+export interface AICapabilities {
+  jsonMode?: boolean;
+  toolCalling?: boolean;
+  webGrounding?: boolean;
+  vision?: boolean;
+}
+
 export interface AIProviderConfig {
   id: string;
   name: string;
-  type: 'openrouter' | 'gemini' | 'openai-compatible' | 'custom';
+  type: 'openrouter' | 'gemini' | 'openai-compatible' | 'custom' | 'custom_openai' | 'custom_rest';
   baseUrl: string;
   apiKey: string;
+  hasKey?: boolean;
   modelName: string;
   defaultModel?: string;
   priority: number;
   enabled: boolean;
   timeoutMs: number;
-  maxRetries: number;
+  maxRetries?: number;
+  maxTokens?: number;
+  temperature?: number;
+  headers?: Record<string, string>;
+  capabilities?: AICapabilities;
+  lastTestedAt?: string;
+  lastTestStatus?: ProviderTestStatus;
+  lastError?: string;
+  lastLatencyMs?: number;
+  usageInfo?: ProviderUsageInfo;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface SearchProviderConfig {
   id: string;
   name: string;
-  type: 'tavily' | 'serpapi' | 'custom';
+  type: 'tavily' | 'serpapi' | 'brave' | 'serper' | 'perplexity' | 'custom';
   apiKey: string;
+  hasKey?: boolean;
   baseUrl: string;
+  searchDepth?: 'basic' | 'advanced';
+  maxResults?: number;
+  topic?: string;
+  timeoutMs?: number;
+  includeDomains?: string[];
+  excludeDomains?: string[];
   priority: number;
   enabled: boolean;
-  maxResults?: number;
+  lastTestedAt?: string;
+  lastTestStatus?: ProviderTestStatus;
+  lastError?: string;
+  lastLatencyMs?: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ApiTestHistoryItem {
+  id: string;
+  providerId: string;
+  providerName: string;
+  providerType: 'ai' | 'search' | string;
+  modelOrQuery?: string;
+  target?: string;
+  timestamp: string;
+  result?: 'SUCCESS' | 'FAILED' | string;
+  status?: ProviderTestStatus | string;
+  latencyMs: number;
+  httpStatus?: number;
+  error?: string;
+  summary?: string;
+  sampleOutput?: string;
+}
+
+export interface AITestResult {
+  success: boolean;
+  status: number | string;
+  model?: string;
+  latencyMs: number;
+  output?: string;
+  sampleOutput?: string;
+  tokenUsage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  };
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  };
+  usageInfo?: ProviderUsageInfo;
+  error?: string;
+  timestamp: string;
+  providerId?: string;
+}
+
+export interface SearchTestResult {
+  success: boolean;
+  status: number | string;
+  latencyMs: number;
+  resultCount?: number;
+  resultsCount?: number;
+  results?: Array<{
+    title: string;
+    url: string;
+    content?: string;
+    snippet?: string;
+    score?: number;
+  }>;
+  rawResults?: Array<{
+    title: string;
+    url: string;
+    content?: string;
+    snippet?: string;
+    score?: number;
+  }>;
+  sampleTitles?: string[];
+  error?: string;
+  timestamp: string;
+  providerId?: string;
 }
 
 export interface JobStepRecord {
