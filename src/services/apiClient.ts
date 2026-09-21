@@ -10,6 +10,7 @@ import {
   AITestResult,
   ApiTestHistoryItem,
   Article,
+  HealthCheckResponse,
   ProviderHealth,
   ProviderUsageInfo,
   ResearchPackage,
@@ -20,6 +21,33 @@ import {
   TopicCandidate,
 } from '../types/agent.ts';
 
+/**
+ * Safe JSON parse utility:
+ * Validates that response is valid JSON and never blindly fails with cryptic
+ * "Unexpected token '<'" when an HTML page or error document is returned.
+ */
+async function safeParseResponse<T>(res: Response): Promise<T> {
+  const contentType = res.headers.get('content-type') || '';
+  const text = await res.text();
+
+  let data: any;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    const preview = text.trim().slice(0, 140);
+    throw new Error(
+      `Invalid server response: expected JSON but received HTTP ${res.status} (${contentType || 'unknown type'}). Response body: ${preview}`
+    );
+  }
+
+  return data as T;
+}
+
+async function safeJsonFetch<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
+  const res = await fetch(input, init);
+  return safeParseResponse<T>(res);
+}
+
 export const apiClient = {
   // Agent Lifecycle
   runCycle: async (topicId?: string): Promise<{ success: boolean; job: AgentJob }> => {
@@ -28,11 +56,11 @@ export const apiClient = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ topicId }),
     });
+    const data = await safeParseResponse<any>(res);
     if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Failed to trigger cycle');
+      throw new Error(data.error || 'Failed to trigger cycle');
     }
-    return res.json();
+    return data;
   },
 
   pauseAgent: async () => {
@@ -164,11 +192,11 @@ export const apiClient = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ provider }),
     });
+    const data = await safeParseResponse<any>(res);
     if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: 'Failed to save AI provider' }));
-      throw new Error(err.error || 'Failed to save AI provider');
+      throw new Error(data.error || 'Failed to save AI provider');
     }
-    return res.json();
+    return data;
   },
 
   deleteAIProvider: async (id: string): Promise<{ success: boolean }> => {
@@ -194,13 +222,12 @@ export const apiClient = {
     return res.json();
   },
 
-  testAIProvider: async (params: { providerId?: string; provider?: AIProviderConfig }): Promise<AITestResult> => {
-    const res = await fetch('/api/providers/ai/test', {
+  testAIProvider: async (params: { providerId?: string; provider?: AIProviderConfig; prompt?: string }): Promise<AITestResult> => {
+    return safeJsonFetch<AITestResult>('/api/providers/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
-    return res.json();
   },
 
   runAIPlayground: async (params: {
@@ -208,31 +235,27 @@ export const apiClient = {
     provider?: AIProviderConfig;
     prompt?: string;
   }): Promise<AITestResult> => {
-    const res = await fetch('/api/providers/ai/playground', {
+    return safeJsonFetch<AITestResult>('/api/providers/ai/playground', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
-    return res.json();
   },
 
   getAIProviderUsage: async (id: string): Promise<{ success: boolean; usageInfo: ProviderUsageInfo }> => {
-    const res = await fetch(`/api/providers/ai/${id}/usage`);
-    return res.json();
+    return safeJsonFetch<{ success: boolean; usageInfo: ProviderUsageInfo }>(`/api/providers/ai/${id}/usage`);
   },
 
   updateAIProviders: async (providers: AIProviderConfig[]) => {
-    const res = await fetch('/api/providers/ai', {
+    return safeJsonFetch<{ success: boolean }>('/api/providers/ai', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ providers }),
     });
-    return res.json();
   },
 
   getSearchProviders: async (): Promise<SearchProviderConfig[]> => {
-    const res = await fetch('/api/providers/search');
-    const data = await res.json();
+    const data = await safeJsonFetch<{ providers?: SearchProviderConfig[] }>('/api/providers/search');
     return data.providers || [];
   },
 
@@ -244,49 +267,48 @@ export const apiClient = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ provider }),
     });
+    const data = await safeParseResponse<any>(res);
     if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: 'Failed to save search provider' }));
-      throw new Error(err.error || 'Failed to save search provider');
+      throw new Error(data.error || 'Failed to save search provider');
     }
-    return res.json();
+    return data;
   },
 
   deleteSearchProvider: async (id: string): Promise<{ success: boolean }> => {
-    const res = await fetch(`/api/providers/search/${id}`, { method: 'DELETE' });
-    return res.json();
+    return safeJsonFetch<{ success: boolean }>(`/api/providers/search/${id}`, { method: 'DELETE' });
   },
 
   reorderSearchProviders: async (ids: string[]): Promise<{ success: boolean; providers: SearchProviderConfig[] }> => {
-    const res = await fetch('/api/providers/search/reorder', {
+    return safeJsonFetch<{ success: boolean; providers: SearchProviderConfig[] }>('/api/providers/search/reorder', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids }),
     });
-    return res.json();
   },
 
   toggleSearchProvider: async (
     id: string,
     enabled: boolean
   ): Promise<{ success: boolean; provider: SearchProviderConfig }> => {
-    const res = await fetch('/api/providers/search/toggle', {
+    return safeJsonFetch<{ success: boolean; provider: SearchProviderConfig }>('/api/providers/search/toggle', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, enabled }),
     });
-    return res.json();
   },
 
   testSearchProvider: async (params: {
     providerId?: string;
     provider?: SearchProviderConfig;
+    query?: string;
+    depth?: 'basic' | 'advanced';
+    maxResults?: number;
   }): Promise<SearchTestResult> => {
-    const res = await fetch('/api/providers/search/test', {
+    return safeJsonFetch<SearchTestResult>('/api/search/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
-    return res.json();
   },
 
   runSearchPlayground: async (params: {
@@ -296,65 +318,245 @@ export const apiClient = {
     depth?: 'basic' | 'advanced';
     maxResults?: number;
   }): Promise<SearchTestResult> => {
-    const res = await fetch('/api/providers/search/playground', {
+    return safeJsonFetch<SearchTestResult>('/api/providers/search/playground', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
-    return res.json();
   },
 
   updateSearchProviders: async (providers: SearchProviderConfig[]) => {
-    const res = await fetch('/api/providers/search', {
+    return safeJsonFetch<{ success: boolean }>('/api/providers/search', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ providers }),
     });
-    return res.json();
   },
 
   getTestHistory: async (limit = 25): Promise<{ history: ApiTestHistoryItem[] }> => {
-    const res = await fetch(`/api/providers/test-history?limit=${limit}`);
-    return res.json();
+    return safeJsonFetch<{ history: ApiTestHistoryItem[] }>(`/api/providers/test-history?limit=${limit}`);
   },
 
   getProvidersHealth: async (): Promise<any> => {
-    const res = await fetch('/api/providers/health');
-    return res.json();
+    return safeJsonFetch<any>('/api/providers/health');
   },
 
   exportProvidersConfig: async (includeSecrets = false): Promise<any> => {
-    const res = await fetch(`/api/providers/export?includeSecrets=${includeSecrets}`);
-    return res.json();
+    return safeJsonFetch<any>(`/api/providers/export?includeSecrets=${includeSecrets}`);
   },
 
   importProvidersConfig: async (config: any): Promise<{ success: boolean; aiCount: number; searchCount: number }> => {
-    const res = await fetch('/api/providers/import', {
+    return safeJsonFetch<{ success: boolean; aiCount: number; searchCount: number }>('/api/providers/import', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ config }),
     });
-    return res.json();
   },
 
   // Blogger & Health
   getBloggerConfig: async () => {
-    const res = await fetch('/api/blogger');
-    const data = await res.json();
+    const data = await safeJsonFetch<{ config: any }>('/api/blogger');
     return data.config;
   },
 
   updateBloggerConfig: async (config: any) => {
-    const res = await fetch('/api/blogger', {
+    return safeJsonFetch<{ success: boolean; config: any }>('/api/blogger', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
     });
-    return res.json();
   },
 
-  getHealth: async (): Promise<{ status: string; providers: ProviderHealth; timestamp: string }> => {
-    const res = await fetch('/api/health');
-    return res.json();
+  getHealth: async (): Promise<HealthCheckResponse> => {
+    return safeJsonFetch<HealthCheckResponse>('/api/health');
+  },
+
+  // Raw Diagnostic Endpoint Testers for the API Diagnostics Page
+  diagnostics: {
+    testHealthEndpoint: async (): Promise<{
+      status_code: number;
+      latency_ms: number;
+      data: any;
+      contentType: string;
+      isJson: boolean;
+      rawText: string;
+    }> => {
+      const startTime = performance.now();
+      try {
+        const res = await fetch('/api/health', {
+          headers: { Accept: 'application/json' },
+        });
+        const latency_ms = Math.round(performance.now() - startTime);
+        const contentType = res.headers.get('content-type') || '';
+        const rawText = await res.text();
+        let data: any = null;
+        let isJson = false;
+        try {
+          data = JSON.parse(rawText);
+          isJson = true;
+        } catch {
+          isJson = false;
+        }
+        return {
+          status_code: res.status,
+          latency_ms,
+          data,
+          contentType,
+          isJson,
+          rawText,
+        };
+      } catch (err: any) {
+        return {
+          status_code: 0,
+          latency_ms: Math.round(performance.now() - startTime),
+          data: null,
+          contentType: '',
+          isJson: false,
+          rawText: err.message,
+        };
+      }
+    },
+
+    testAIEndpoint: async (payload: any): Promise<{
+      status_code: number;
+      latency_ms: number;
+      data: any;
+      contentType: string;
+      isJson: boolean;
+      rawText: string;
+    }> => {
+      const startTime = performance.now();
+      try {
+        const res = await fetch('/api/providers/test', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify(payload),
+        });
+        const latency_ms = Math.round(performance.now() - startTime);
+        const contentType = res.headers.get('content-type') || '';
+        const rawText = await res.text();
+        let data: any = null;
+        let isJson = false;
+        try {
+          data = JSON.parse(rawText);
+          isJson = true;
+        } catch {
+          isJson = false;
+        }
+        return {
+          status_code: res.status,
+          latency_ms,
+          data,
+          contentType,
+          isJson,
+          rawText,
+        };
+      } catch (err: any) {
+        return {
+          status_code: 0,
+          latency_ms: Math.round(performance.now() - startTime),
+          data: null,
+          contentType: '',
+          isJson: false,
+          rawText: err.message,
+        };
+      }
+    },
+
+    testSearchEndpoint: async (payload: any): Promise<{
+      status_code: number;
+      latency_ms: number;
+      data: any;
+      contentType: string;
+      isJson: boolean;
+      rawText: string;
+    }> => {
+      const startTime = performance.now();
+      try {
+        const res = await fetch('/api/search/test', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify(payload),
+        });
+        const latency_ms = Math.round(performance.now() - startTime);
+        const contentType = res.headers.get('content-type') || '';
+        const rawText = await res.text();
+        let data: any = null;
+        let isJson = false;
+        try {
+          data = JSON.parse(rawText);
+          isJson = true;
+        } catch {
+          isJson = false;
+        }
+        return {
+          status_code: res.status,
+          latency_ms,
+          data,
+          contentType,
+          isJson,
+          rawText,
+        };
+      } catch (err: any) {
+        return {
+          status_code: 0,
+          latency_ms: Math.round(performance.now() - startTime),
+          data: null,
+          contentType: '',
+          isJson: false,
+          rawText: err.message,
+        };
+      }
+    },
+
+    testUnknownRoute: async (routePath: string): Promise<{
+      status_code: number;
+      latency_ms: number;
+      data: any;
+      contentType: string;
+      isJson: boolean;
+      rawText: string;
+    }> => {
+      const startTime = performance.now();
+      try {
+        const res = await fetch(routePath, {
+          headers: { Accept: 'application/json' },
+        });
+        const latency_ms = Math.round(performance.now() - startTime);
+        const contentType = res.headers.get('content-type') || '';
+        const rawText = await res.text();
+        let data: any = null;
+        let isJson = false;
+        try {
+          data = JSON.parse(rawText);
+          isJson = true;
+        } catch {
+          isJson = false;
+        }
+        return {
+          status_code: res.status,
+          latency_ms,
+          data,
+          contentType,
+          isJson,
+          rawText,
+        };
+      } catch (err: any) {
+        return {
+          status_code: 0,
+          latency_ms: Math.round(performance.now() - startTime),
+          data: null,
+          contentType: '',
+          isJson: false,
+          rawText: err.message,
+        };
+      }
+    },
   },
 };

@@ -571,5 +571,31 @@
   },
   "lock": {
     "isLocked": false
-  }
+  },
+  "testHistory": [
+    {
+      "providerName": "Test Tavily",
+      "providerType": "search",
+      "modelOrQuery": "test query",
+      "result": "FAILED",
+      "latencyMs": 734,
+      "httpStatus": 401,
+      "error": "Unauthorized: missing or invalid API key.",
+      "summary": "Tavily failed: Unauthorized: missing or invalid API key.",
+      "id": "test_1789985794634_iw0z",
+      "timestamp": "2026-09-21T10:16:34.634Z"
+    },
+    {
+      "providerName": "Test OpenRouter",
+      "providerType": "ai",
+      "modelOrQuery": "google/gemini-2.0-flash-001",
+      "result": "FAILED",
+      "latencyMs": 50,
+      "httpStatus": 401,
+      "error": "Missing Authentication header",
+      "summary": "HTTP 401: Missing Authentication header",
+      "id": "test_1789985789689_tvmi",
+      "timestamp": "2026-09-21T10:16:29.689Z"
+    }
+  ]
 }

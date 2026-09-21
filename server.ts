@@ -268,9 +268,11 @@ app.post('/api/providers/ai/toggle', (req: Request, res: Response) => {
   res.json({ success: Boolean(updated), provider: updated });
 });
 
-app.post('/api/providers/ai/test', async (req: Request, res: Response) => {
+// Alias for Section 1, 6 & 8: /api/providers/test and /api/providers/ai/test
+const handleAIProviderTest = async (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'application/json');
   try {
-    const { providerId, provider } = req.body;
+    const { providerId, provider } = req.body || {};
     let targetProvider = provider;
 
     if (providerId) {
@@ -278,7 +280,15 @@ app.post('/api/providers/ai/test', async (req: Request, res: Response) => {
     }
 
     if (!targetProvider) {
-      return res.status(404).json({ success: false, error: 'Provider not found' });
+      return res.status(404).json({
+        success: false,
+        status: 'FAILED',
+        status_code: 404,
+        error: 'Provider not found',
+        latency_ms: 0,
+        latencyMs: 0,
+        timestamp: new Date().toISOString(),
+      });
     }
 
     // If key is masked in incoming payload, resolve from storage
@@ -291,9 +301,20 @@ app.post('/api/providers/ai/test', async (req: Request, res: Response) => {
     res.json(testResult);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    res.status(500).json({ success: false, error: msg });
+    res.status(500).json({
+      success: false,
+      status: 'FAILED',
+      status_code: 500,
+      error: msg,
+      latency_ms: 0,
+      latencyMs: 0,
+      timestamp: new Date().toISOString(),
+    });
   }
-});
+};
+
+app.post('/api/providers/test', handleAIProviderTest);
+app.post('/api/providers/ai/test', handleAIProviderTest);
 
 app.post('/api/providers/ai/playground', async (req: Request, res: Response) => {
   try {
@@ -415,9 +436,10 @@ app.post('/api/providers/search/toggle', (req: Request, res: Response) => {
   res.json({ success: Boolean(updated), provider: updated });
 });
 
-app.post('/api/providers/search/test', async (req: Request, res: Response) => {
+const handleSearchProviderTest = async (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'application/json');
   try {
-    const { providerId, provider } = req.body;
+    const { providerId, provider, query } = req.body || {};
     let targetProvider = provider;
 
     if (providerId) {
@@ -425,7 +447,15 @@ app.post('/api/providers/search/test', async (req: Request, res: Response) => {
     }
 
     if (!targetProvider) {
-      return res.status(404).json({ success: false, error: 'Search provider not found' });
+      return res.status(404).json({
+        success: false,
+        status: 'FAILED',
+        status_code: 404,
+        error: 'Search provider not found',
+        latency_ms: 0,
+        latencyMs: 0,
+        timestamp: new Date().toISOString(),
+      });
     }
 
     if (targetProvider.apiKey && targetProvider.apiKey.includes('••••')) {
@@ -433,13 +463,29 @@ app.post('/api/providers/search/test', async (req: Request, res: Response) => {
       if (stored) targetProvider.apiKey = stored.apiKey;
     }
 
-    const testResult = await testingService.testSearchProvider(targetProvider, 'ai agent verification ping', 'basic', 3);
+    const testResult = await testingService.testSearchProvider(
+      targetProvider,
+      query || 'ai agent verification ping',
+      'basic',
+      3
+    );
     res.json(testResult);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    res.status(500).json({ success: false, error: msg });
+    res.status(500).json({
+      success: false,
+      status: 'FAILED',
+      status_code: 500,
+      error: msg,
+      latency_ms: 0,
+      latencyMs: 0,
+      timestamp: new Date().toISOString(),
+    });
   }
-});
+};
+
+app.post('/api/search/test', handleSearchProviderTest);
+app.post('/api/providers/search/test', handleSearchProviderTest);
 
 app.post('/api/providers/search/playground', async (req: Request, res: Response) => {
   try {
@@ -603,6 +649,7 @@ app.get('/api/blogger/oauth/url', (req: Request, res: Response) => {
 
 // --- 9. API Health Monitor ---
 app.get('/api/health', (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'application/json');
   const aiProviders = storage.getAIProviders();
   const searchProviders = storage.getSearchProviders();
   const bloggerCfg = storage.getBloggerConfig();
@@ -612,8 +659,15 @@ app.get('/api/health', (req: Request, res: Response) => {
   const tavily = searchProviders.find((p) => p.type === 'tavily');
 
   res.json({
-    timestamp: new Date().toISOString(),
+    success: true,
+    service: 'content-agent-api',
     status: 'HEALTHY',
+    status_code: 200,
+    timestamp: new Date().toISOString(),
+    functions: {
+      providers_test: true,
+      search_test: true,
+    },
     providers: {
       openrouter: openrouter?.apiKey || process.env.OPENROUTER_API_KEY ? 'ONLINE' : 'NOT_CONFIGURED',
       gemini: gemini?.apiKey || process.env.GEMINI_API_KEY ? 'ONLINE' : 'NOT_CONFIGURED',
@@ -625,6 +679,20 @@ app.get('/api/health', (req: Request, res: Response) => {
       x: process.env.X_ACCESS_TOKEN ? 'CONNECTED' : 'NOT_CONFIGURED',
       threads: process.env.THREADS_ACCESS_TOKEN ? 'CONNECTED' : 'NOT_CONFIGURED',
     },
+  });
+});
+
+// --- 9.1 CRITICAL: Explicit API 404 Route Handler ---
+// Ensures that ANY request to /api/* that does not match an Express route returns a JSON 404,
+// completely preventing Vite or the SPA index.html fallback from serving HTML.
+app.all('/api/*', (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.status(404).json({
+    success: false,
+    error: `API endpoint not found: ${req.method} ${req.originalUrl || req.path}`,
+    status: 'NOT_FOUND',
+    status_code: 404,
+    timestamp: new Date().toISOString(),
   });
 });
 

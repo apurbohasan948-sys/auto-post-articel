@@ -304,8 +304,12 @@ export interface ApiTestHistoryItem {
 export interface AITestResult {
   success: boolean;
   status: number | string;
+  status_code?: number;
+  provider?: string;
   model?: string;
   latencyMs: number;
+  latency_ms?: number;
+  message?: string;
   output?: string;
   sampleOutput?: string;
   tokenUsage?: {
@@ -327,7 +331,12 @@ export interface AITestResult {
 export interface SearchTestResult {
   success: boolean;
   status: number | string;
+  status_code?: number;
+  provider?: string;
+  query?: string;
   latencyMs: number;
+  latency_ms?: number;
+  message?: string;
   resultCount?: number;
   resultsCount?: number;
   results?: Array<{
@@ -437,4 +446,18 @@ export interface ProviderHealth {
   linkedin: 'CONNECTED' | 'DISCONNECTED' | 'NOT_CONFIGURED';
   x: 'CONNECTED' | 'DISCONNECTED' | 'NOT_CONFIGURED';
   threads: 'CONNECTED' | 'DISCONNECTED' | 'NOT_CONFIGURED';
+}
+
+export interface HealthCheckResponse {
+  success: boolean;
+  service: string;
+  status: 'HEALTHY' | 'DEGRADED' | 'FAILED' | string;
+  status_code: number;
+  timestamp: string;
+  functions: {
+    providers_test: boolean;
+    search_test: boolean;
+  };
+  providers: ProviderHealth;
+  error?: string;
 }

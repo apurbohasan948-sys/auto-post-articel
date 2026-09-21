@@ -8,6 +8,7 @@ import { ArticlesView } from './components/ArticlesView.tsx';
 import { ResearchView } from './components/ResearchView.tsx';
 import { PublishingView } from './components/PublishingView.tsx';
 import { ProvidersView } from './components/ProvidersView.tsx';
+import { ApiDiagnosticsView } from './components/ApiDiagnosticsView.tsx';
 import { AnalyticsMemoryView } from './components/AnalyticsMemoryView.tsx';
 import { LogsView } from './components/LogsView.tsx';
 import { SettingsView } from './components/SettingsView.tsx';
@@ -417,6 +418,13 @@ export default function App() {
             searchProviders={searchProviders}
             onUpdateAI={handleUpdateAI}
             onUpdateSearch={handleUpdateSearch}
+          />
+        )}
+
+        {activeTab === 'diagnostics' && (
+          <ApiDiagnosticsView
+            aiProviders={aiProviders}
+            searchProviders={searchProviders}
           />
         )}
 

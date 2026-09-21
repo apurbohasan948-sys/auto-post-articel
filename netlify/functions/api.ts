@@ -177,18 +177,33 @@ export const handler = async (event: any) => {
       return { statusCode: 200, headers, body: JSON.stringify({ success: Boolean(updated), provider: updated }) };
     }
 
-    if (path === '/providers/ai/test' && method === 'POST') {
+    if ((path === '/providers/test' || path === '/providers/ai/test') && method === 'POST') {
       let target = body.provider;
       if (body.providerId) {
         target = storage.getAIProviders().find((p) => p.id === body.providerId);
       }
-      if (!target) return { statusCode: 404, headers, body: JSON.stringify({ error: 'Provider not found' }) };
+      if (!target) {
+        return {
+          statusCode: 404,
+          headers,
+          body: JSON.stringify({
+            success: false,
+            status: 'FAILED',
+            status_code: 404,
+            error: 'Provider not found',
+            latency_ms: 0,
+            latencyMs: 0,
+            timestamp: new Date().toISOString(),
+          }),
+        };
+      }
       if (target.apiKey && target.apiKey.includes('••••')) {
         const stored = storage.getAIProviders().find((p) => p.id === target.id);
         if (stored) target.apiKey = stored.apiKey;
       }
-      const testResult = await testingService.testAIProvider(target);
-      return { statusCode: 200, headers, body: JSON.stringify(testResult) };
+      const testResult = await testingService.testAIProvider(target, body.prompt || 'Write one short sentence about technology.');
+      const httpStatus = typeof testResult.status === 'number' ? testResult.status : testResult.success ? 200 : 400;
+      return { statusCode: httpStatus, headers, body: JSON.stringify(testResult) };
     }
 
     if (path === '/providers/ai/playground' && method === 'POST') {
@@ -278,18 +293,36 @@ export const handler = async (event: any) => {
       return { statusCode: 200, headers, body: JSON.stringify({ success: Boolean(updated), provider: updated }) };
     }
 
-    if (path === '/providers/search/test' && method === 'POST') {
+    if ((path === '/search/test' || path === '/providers/search/test') && method === 'POST') {
       let target = body.provider;
       if (body.providerId) {
         target = storage.getSearchProviders().find((p) => p.id === body.providerId);
       }
-      if (!target) return { statusCode: 404, headers, body: JSON.stringify({ error: 'Search provider not found' }) };
+      if (!target) {
+        return {
+          statusCode: 404,
+          headers,
+          body: JSON.stringify({
+            success: false,
+            status: 'FAILED',
+            status_code: 404,
+            error: 'Search provider not found',
+            latency_ms: 0,
+            latencyMs: 0,
+            result_count: 0,
+            resultsCount: 0,
+            results: [],
+            timestamp: new Date().toISOString(),
+          }),
+        };
+      }
       if (target.apiKey && target.apiKey.includes('••••')) {
         const stored = storage.getSearchProviders().find((p) => p.id === target.id);
         if (stored) target.apiKey = stored.apiKey;
       }
-      const result = await testingService.testSearchProvider(target, 'ai agent verification ping', 'basic', 3);
-      return { statusCode: 200, headers, body: JSON.stringify(result) };
+      const result = await testingService.testSearchProvider(target, body.query || 'ai agent verification ping', body.depth || 'basic', body.maxResults || 3);
+      const httpStatus = typeof result.status === 'number' ? result.status : result.success ? 200 : 400;
+      return { statusCode: httpStatus, headers, body: JSON.stringify(result) };
     }
 
     if (path === '/providers/search/playground' && method === 'POST') {
@@ -404,8 +437,15 @@ export const handler = async (event: any) => {
         statusCode: 200,
         headers,
         body: JSON.stringify({
-          timestamp: new Date().toISOString(),
+          success: true,
+          service: 'content-agent-api',
           status: 'HEALTHY',
+          status_code: 200,
+          timestamp: new Date().toISOString(),
+          functions: {
+            providers_test: true,
+            search_test: true,
+          },
           providers: {
             openrouter: openrouter?.apiKey || process.env.OPENROUTER_API_KEY ? 'ONLINE' : 'NOT_CONFIGURED',
             gemini: gemini?.apiKey || process.env.GEMINI_API_KEY ? 'ONLINE' : 'NOT_CONFIGURED',
@@ -421,7 +461,16 @@ export const handler = async (event: any) => {
       };
     }
 
-    return { statusCode: 404, headers, body: JSON.stringify({ error: `Path not found: ${path}` }) };
+    return {
+      statusCode: 404,
+      headers,
+      body: JSON.stringify({
+        success: false,
+        error: `API route not found: ${path}`,
+        status_code: 404,
+        timestamp: new Date().toISOString(),
+      }),
+    };
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : String(err);
     return {

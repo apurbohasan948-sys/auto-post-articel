@@ -15,6 +15,7 @@ import {
 } from '../types/agent.ts';
 import { decryptSecret } from './encryption.ts';
 import { StorageService } from './storage.ts';
+import { normalizeChatCompletionsUrl, normalizeTavilySearchUrl } from './urlHelper.ts';
 
 export class ProviderTestingService {
   private static instance: ProviderTestingService;
@@ -33,28 +34,109 @@ export class ProviderTestingService {
 
   /**
    * Tests an AI provider with either a quick ping or custom playground prompt.
+   * Follows strict 8-step server-side validation:
+   * 1. Validate provider config
+   * 2. Validate Base URL
+   * 3. Validate Model Name
+   * 4. Validate API key
+   * 5. Send minimal test request
+   * 6. Receive provider response
+   * 7. Validate response
+   * 8. Return normalized JSON
    */
   public async testAIProvider(
     provider: AIProviderConfig,
     prompt: string = 'Write one short sentence about technology.'
   ): Promise<AITestResult> {
     const startTime = Date.now();
-    const rawApiKey = decryptSecret(provider.apiKey) || (provider.type === 'gemini' ? process.env.GEMINI_API_KEY || '' : '');
+
+    // 1. Validate provider configuration
+    if (!provider || !provider.name) {
+      return {
+        success: false,
+        status: 'FAILED',
+        status_code: 400,
+        provider: provider?.name || 'Unknown',
+        model: 'unspecified',
+        latencyMs: 0,
+        latency_ms: 0,
+        error: 'Invalid provider configuration payload.',
+        timestamp: new Date().toISOString(),
+      };
+    }
+
+    // 2. Validate Model Name
+    const modelName = (provider.modelName || provider.defaultModel || '').trim();
+    if (!modelName) {
+      const errorMsg = `Model name is required for testing provider "${provider.name}".`;
+      return {
+        success: false,
+        status: 'FAILED',
+        status_code: 400,
+        provider: provider.name,
+        model: 'unspecified',
+        latencyMs: 0,
+        latency_ms: 0,
+        error: errorMsg,
+        timestamp: new Date().toISOString(),
+      };
+    }
+
+    // 3. Validate Base URL for HTTP/OpenAI endpoints
+    let endpoint = '';
+    if (provider.type !== 'gemini') {
+      const defaultBase = provider.type === 'openrouter' ? 'https://openrouter.ai/api/v1' : 'https://api.openai.com/v1';
+      const rawBase = (provider.baseUrl || defaultBase).trim();
+
+      try {
+        const parsed = new URL(rawBase);
+        if (!['http:', 'https:'].includes(parsed.protocol)) {
+          throw new Error('Base URL protocol must be http:// or https://');
+        }
+        endpoint = normalizeChatCompletionsUrl(rawBase);
+      } catch (urlErr) {
+        const errorMsg = `Invalid Base URL: "${rawBase}". Expected a valid URL (e.g. https://openrouter.ai/api/v1).`;
+        return {
+          success: false,
+          status: 'FAILED',
+          status_code: 400,
+          provider: provider.name,
+          model: modelName,
+          latencyMs: 0,
+          latency_ms: 0,
+          error: errorMsg,
+          timestamp: new Date().toISOString(),
+        };
+      }
+    }
+
+    // 4. Validate API key
+    let rawApiKey = decryptSecret(provider.apiKey);
+    if (!rawApiKey) {
+      if (provider.type === 'gemini') {
+        rawApiKey = process.env.GEMINI_API_KEY || '';
+      } else if (provider.type === 'openrouter') {
+        rawApiKey = process.env.OPENROUTER_API_KEY || '';
+      }
+    }
 
     if (!rawApiKey && provider.type !== 'custom') {
       const result: AITestResult = {
         success: false,
-        status: 401,
-        model: provider.modelName || 'unspecified',
+        status: 'FAILED',
+        status_code: 401,
+        provider: provider.name,
+        model: modelName,
         latencyMs: 0,
-        error: 'No API key configured for this provider.',
+        latency_ms: 0,
+        error: `No API key configured for ${provider.name}. Please supply a valid key.`,
         timestamp: new Date().toISOString(),
       };
       this.recordHistory({
         providerId: provider.id,
         providerName: provider.name,
         providerType: 'ai',
-        modelOrQuery: provider.modelName,
+        modelOrQuery: modelName,
         result: 'FAILED',
         latencyMs: 0,
         httpStatus: 401,
@@ -67,14 +149,14 @@ export class ProviderTestingService {
     try {
       if (provider.type === 'gemini') {
         const ai = new GoogleGenAI({ apiKey: rawApiKey });
-        const modelName = provider.modelName || 'gemini-3.8-flash';
+        const targetGeminiModel = modelName || 'gemini-2.5-flash';
 
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), provider.timeoutMs || 30000);
 
         try {
           const response = await ai.models.generateContent({
-            model: modelName,
+            model: targetGeminiModel,
             contents: prompt,
             config: {
               maxOutputTokens: 120,
@@ -88,11 +170,21 @@ export class ProviderTestingService {
 
           const testResult: AITestResult = {
             success: true,
-            status: 200,
-            model: modelName,
+            status: 'connected',
+            status_code: 200,
+            provider: provider.name,
+            model: targetGeminiModel,
             latencyMs,
+            latency_ms: latencyMs,
+            message: 'API connection successful',
             output,
+            sampleOutput: output,
             tokenUsage: {
+              promptTokens: response.usageMetadata?.promptTokenCount,
+              completionTokens: response.usageMetadata?.candidatesTokenCount,
+              totalTokens: response.usageMetadata?.totalTokenCount,
+            },
+            usage: {
               promptTokens: response.usageMetadata?.promptTokenCount,
               completionTokens: response.usageMetadata?.candidatesTokenCount,
               totalTokens: response.usageMetadata?.totalTokenCount,
@@ -112,11 +204,11 @@ export class ProviderTestingService {
             providerId: provider.id,
             providerName: provider.name,
             providerType: 'ai',
-            modelOrQuery: modelName,
+            modelOrQuery: targetGeminiModel,
             result: 'SUCCESS',
             latencyMs,
             httpStatus: 200,
-            summary: `Model ${modelName} responded (${latencyMs}ms)`,
+            summary: `Model ${targetGeminiModel} responded (${latencyMs}ms)`,
           });
 
           return testResult;
@@ -126,12 +218,7 @@ export class ProviderTestingService {
         }
       }
 
-      // OpenAI-compatible / OpenRouter / Custom endpoints
-      const baseUrl =
-        provider.baseUrl ||
-        (provider.type === 'openrouter' ? 'https://openrouter.ai/api/v1' : 'https://api.openai.com/v1');
-      const endpoint = `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
-
+      // 5. Send minimal test request to OpenAI-compatible / OpenRouter / Custom endpoints
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), provider.timeoutMs || 35000);
 
@@ -145,11 +232,16 @@ export class ProviderTestingService {
         headers['X-Title'] = 'Axiom API Control Center';
       }
 
+      // Merge custom headers if configured
+      if (provider.headers && typeof provider.headers === 'object') {
+        Object.assign(headers, provider.headers);
+      }
+
       const res = await fetch(endpoint, {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          model: provider.modelName,
+          model: modelName,
           messages: [{ role: 'user', content: prompt }],
           max_tokens: 120,
           temperature: 0.3,
@@ -160,6 +252,7 @@ export class ProviderTestingService {
       clearTimeout(timeout);
       const latencyMs = Date.now() - startTime;
 
+      // 6. Receive provider response & handle errors
       if (!res.ok) {
         let errMessage = `HTTP ${res.status} ${res.statusText}`;
         try {
@@ -168,6 +261,8 @@ export class ProviderTestingService {
             errMessage = errBody.error.message;
           } else if (typeof errBody.error === 'string') {
             errMessage = errBody.error;
+          } else if (errBody.message) {
+            errMessage = errBody.message;
           }
         } catch {
           const txt = await res.text();
@@ -176,9 +271,12 @@ export class ProviderTestingService {
 
         const testResult: AITestResult = {
           success: false,
-          status: res.status,
-          model: provider.modelName,
+          status: 'FAILED',
+          status_code: res.status,
+          provider: provider.name,
+          model: modelName,
           latencyMs,
+          latency_ms: latencyMs,
           error: errMessage,
           timestamp: new Date().toISOString(),
         };
@@ -188,7 +286,7 @@ export class ProviderTestingService {
           providerId: provider.id,
           providerName: provider.name,
           providerType: 'ai',
-          modelOrQuery: provider.modelName,
+          modelOrQuery: modelName,
           result: 'FAILED',
           latencyMs,
           httpStatus: res.status,
@@ -199,6 +297,7 @@ export class ProviderTestingService {
         return testResult;
       }
 
+      // 7. Validate response payload
       const data = await res.json();
       const output = data.choices?.[0]?.message?.content || '';
 
@@ -224,13 +323,24 @@ export class ProviderTestingService {
         }
       }
 
+      // 8. Return normalized JSON to frontend
       const testResult: AITestResult = {
         success: true,
-        status: res.status,
-        model: data.model || provider.modelName,
+        status: 'connected',
+        status_code: res.status,
+        provider: provider.name,
+        model: data.model || modelName,
         latencyMs,
+        latency_ms: latencyMs,
+        message: 'API connection successful',
         output,
+        sampleOutput: output,
         tokenUsage: {
+          promptTokens: data.usage?.prompt_tokens,
+          completionTokens: data.usage?.completion_tokens,
+          totalTokens: data.usage?.total_tokens,
+        },
+        usage: {
           promptTokens: data.usage?.prompt_tokens,
           completionTokens: data.usage?.completion_tokens,
           totalTokens: data.usage?.total_tokens,
@@ -244,11 +354,11 @@ export class ProviderTestingService {
         providerId: provider.id,
         providerName: provider.name,
         providerType: 'ai',
-        modelOrQuery: provider.modelName,
+        modelOrQuery: modelName,
         result: 'SUCCESS',
         latencyMs,
         httpStatus: res.status,
-        summary: `Model ${provider.modelName} verified (${latencyMs}ms)`,
+        summary: `Model ${modelName} verified (${latencyMs}ms)`,
       });
 
       return testResult;
@@ -258,9 +368,12 @@ export class ProviderTestingService {
 
       const testResult: AITestResult = {
         success: false,
-        status: 500,
-        model: provider.modelName,
+        status: 'FAILED',
+        status_code: 500,
+        provider: provider.name,
+        model: modelName,
         latencyMs,
+        latency_ms: latencyMs,
         error: errorMsg,
         timestamp: new Date().toISOString(),
       };
@@ -270,7 +383,7 @@ export class ProviderTestingService {
         providerId: provider.id,
         providerName: provider.name,
         providerType: 'ai',
-        modelOrQuery: provider.modelName,
+        modelOrQuery: modelName,
         result: 'FAILED',
         latencyMs,
         httpStatus: 500,
@@ -324,17 +437,40 @@ export class ProviderTestingService {
     maxResults: number = 5
   ): Promise<SearchTestResult> {
     const startTime = Date.now();
+
+    if (!provider || !provider.name) {
+      return {
+        success: false,
+        status: 'FAILED',
+        status_code: 400,
+        provider: 'Unknown',
+        query,
+        latencyMs: 0,
+        latency_ms: 0,
+        resultCount: 0,
+        resultsCount: 0,
+        results: [],
+        error: 'Invalid search provider configuration.',
+        timestamp: new Date().toISOString(),
+      };
+    }
+
     const rawApiKey = decryptSecret(provider.apiKey) || (provider.type === 'tavily' ? process.env.TAVILY_API_KEY || '' : '');
 
     if (provider.type === 'tavily') {
       if (!rawApiKey) {
         const res: SearchTestResult = {
           success: false,
-          status: 401,
+          status: 'FAILED',
+          status_code: 401,
+          provider: provider.name,
+          query,
           latencyMs: 0,
+          latency_ms: 0,
           resultCount: 0,
+          resultsCount: 0,
           results: [],
-          error: 'Missing Tavily API key. Provide API key or set TAVILY_API_KEY.',
+          error: 'Missing Tavily API key. Provide an API key in settings or set TAVILY_API_KEY.',
           timestamp: new Date().toISOString(),
         };
         this.recordHistory({
@@ -351,7 +487,7 @@ export class ProviderTestingService {
         return res;
       }
 
-      const endpoint = `${(provider.baseUrl || 'https://api.tavily.com').replace(/\/+$/, '')}/search`;
+      const endpoint = normalizeTavilySearchUrl(provider.baseUrl);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), provider.timeoutMs || 25000);
 
@@ -385,9 +521,14 @@ export class ProviderTestingService {
 
           const result: SearchTestResult = {
             success: false,
-            status: response.status,
+            status: 'FAILED',
+            status_code: response.status,
+            provider: provider.name,
+            query,
             latencyMs,
+            latency_ms: latencyMs,
             resultCount: 0,
+            resultsCount: 0,
             results: [],
             error: errorMsg,
             timestamp: new Date().toISOString(),
@@ -415,14 +556,21 @@ export class ProviderTestingService {
           title: r.title || 'Untitled Source',
           url: r.url || '',
           content: r.content || r.snippet || '',
+          snippet: r.snippet || r.content || '',
           score: r.score,
         }));
 
         const result: SearchTestResult = {
           success: true,
-          status: 200,
+          status: 'connected',
+          status_code: 200,
+          provider: provider.name,
+          query,
           latencyMs,
+          latency_ms: latencyMs,
+          message: 'Search connection successful',
           resultCount: formatted.length,
+          resultsCount: formatted.length,
           results: formatted,
           timestamp: new Date().toISOString(),
         };

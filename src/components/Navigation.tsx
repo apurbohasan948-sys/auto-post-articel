@@ -10,6 +10,7 @@ import {
   Brain,
   Terminal,
   Settings,
+  Activity,
 } from 'lucide-react';
 
 export type NavTab =
@@ -20,6 +21,7 @@ export type NavTab =
   | 'research'
   | 'publishing'
   | 'providers'
+  | 'diagnostics'
   | 'analytics'
   | 'logs'
   | 'settings';
@@ -44,6 +46,7 @@ export const Navigation: React.FC<NavigationProps> = ({ activeTab, onChangeTab, 
     { id: 'research' as NavTab, label: 'Tavily Research', icon: Search },
     { id: 'publishing' as NavTab, label: 'Blogger & Social', icon: Share2 },
     { id: 'providers' as NavTab, label: 'API Control Center', icon: Cpu },
+    { id: 'diagnostics' as NavTab, label: 'API Diagnostics', icon: Activity, badge: 'Probe' },
     { id: 'analytics' as NavTab, label: 'Analytics & Memory', icon: Brain },
     { id: 'logs' as NavTab, label: 'System Logs', icon: Terminal, count: counts.logs },
     { id: 'settings' as NavTab, label: 'Settings', icon: Settings },
