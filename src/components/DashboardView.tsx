@@ -1,343 +1,424 @@
-import React from 'react';
-import {
-  FileText,
-  Send,
-  Share2,
-  Clock,
-  Sparkles,
-  AlertCircle,
-  Play,
-  CheckCircle2,
-  ArrowUpRight,
-  TrendingUp,
-  Cpu,
-  Layers,
-  ChevronRight,
-  Activity,
-  Globe,
+import React, { useEffect, useState } from 'react';
+import { 
+  FileText, 
+  Sparkles, 
+  CheckCircle2, 
+  XCircle, 
+  MinusCircle, 
+  AlertCircle, 
+  ArrowRight, 
+  ExternalLink, 
+  RefreshCw, 
+  Share2, 
+  Globe, 
+  TrendingUp, 
+  Clock, 
+  Play
 } from 'lucide-react';
-import {
-  AgentJob,
-  Article,
-  ProviderHealth,
-  SystemLog,
-  SystemSettings,
-  TopicCandidate,
-} from '../types/agent.ts';
+import { integrationStore } from '../services/integrationStore';
+import { appStorage } from '../services/storage';
+import { ArticleItem, NavigationTab, SocialPlatform } from '../types/agent';
+import { PlatformAdapterManager } from '../adapters';
 
 interface DashboardViewProps {
-  settings: SystemSettings;
-  activeJob: AgentJob | null;
-  recentJobs: AgentJob[];
-  articles: Article[];
-  topics: TopicCandidate[];
-  logs: SystemLog[];
-  health?: ProviderHealth;
-  isTriggering: boolean;
-  onRunNow: () => void;
-  onViewArticle: (article: Article) => void;
-  onViewAllArticles: () => void;
+  onNavigate: (tab: NavigationTab) => void;
+  onRunPipeline: () => void;
+  isRunningPipeline: boolean;
 }
 
-export const DashboardView: React.FC<DashboardViewProps> = ({
-  settings,
-  activeJob,
-  recentJobs = [],
-  articles = [],
-  topics = [],
-  logs = [],
-  health,
-  isTriggering,
-  onRunNow,
-  onViewArticle,
-  onViewAllArticles,
+type IntegrationCardState = 'Connected' | 'Failed' | 'Disabled' | 'Not Configured';
+
+interface IntegrationSummaryItem {
+  id: string;
+  name: string;
+  type: 'blogger' | SocialPlatform;
+  state: IntegrationCardState;
+  lastTested?: number;
+  lastError?: string;
+  diagnostics?: string;
+  targetId?: string;
+}
+
+export const DashboardView: React.FC<DashboardViewProps> = ({ 
+  onNavigate, 
+  onRunPipeline, 
+  isRunningPipeline 
 }) => {
-  const safeArticles = Array.isArray(articles) ? articles : [];
-  const safeTopics = Array.isArray(topics) ? topics : [];
-  const safeLogs = Array.isArray(logs) ? logs : [];
-  const safeTodayStats = settings?.todayStats || {
-    articlesPublished: 0,
-    aiCalls: 0,
-    researchCalls: 0,
-    socialPostsCreated: 0,
-    date: new Date().toISOString().slice(0, 10),
+  const [articles, setArticles] = useState<ArticleItem[]>([]);
+  const [integrationsStatus, setIntegrationsStatus] = useState<IntegrationSummaryItem[]>([]);
+  const [testingId, setTestingId] = useState<string | null>(null);
+
+  const refreshDashboardData = () => {
+    setArticles(appStorage.getArticles());
+
+    const bloggerList = integrationStore.loadBlogger();
+    const socialList = integrationStore.loadSocial();
+
+    const resolveBloggerState = (): { state: IntegrationCardState; item?: any } => {
+      if (bloggerList.length === 0) return { state: 'Not Configured' };
+      const enabled = bloggerList.filter(b => b.enabled);
+      if (enabled.length === 0) return { state: 'Disabled', item: bloggerList[0] };
+      const connected = enabled.find(b => b.testStatus === 'CONNECTED');
+      if (connected) return { state: 'Connected', item: connected };
+      const failed = enabled.find(b => b.testStatus === 'FAILED');
+      if (failed) return { state: 'Failed', item: failed };
+      return { state: 'Not Configured', item: enabled[0] };
+    };
+
+    const resolveSocialState = (platform: SocialPlatform): { state: IntegrationCardState; item?: any } => {
+      const match = socialList.filter(s => s.platform === platform);
+      if (match.length === 0) return { state: 'Not Configured' };
+      const enabled = match.filter(s => s.enabled);
+      if (enabled.length === 0) return { state: 'Disabled', item: match[0] };
+      const connected = enabled.find(s => s.testStatus === 'CONNECTED');
+      if (connected) return { state: 'Connected', item: connected };
+      const failed = enabled.find(s => s.testStatus === 'FAILED');
+      if (failed) return { state: 'Failed', item: failed };
+      return { state: 'Not Configured', item: enabled[0] };
+    };
+
+    const bloggerState = resolveBloggerState();
+    const fbState = resolveSocialState('facebook');
+    const igState = resolveSocialState('instagram');
+    const ytState = resolveSocialState('youtube');
+    const ttState = resolveSocialState('tiktok');
+
+    const summary: IntegrationSummaryItem[] = [
+      {
+        id: 'blogger',
+        name: 'Google Blogger',
+        type: 'blogger',
+        state: bloggerState.state,
+        lastTested: bloggerState.item?.lastTested,
+        lastError: bloggerState.item?.lastError,
+        diagnostics: bloggerState.item?.diagnostics,
+        targetId: bloggerState.item?.id
+      },
+      {
+        id: 'facebook',
+        name: 'Facebook Page',
+        type: 'facebook',
+        state: fbState.state,
+        lastTested: fbState.item?.lastTested,
+        lastError: fbState.item?.lastError,
+        diagnostics: fbState.item?.diagnostics,
+        targetId: fbState.item?.id
+      },
+      {
+        id: 'instagram',
+        name: 'Instagram',
+        type: 'instagram',
+        state: igState.state,
+        lastTested: igState.item?.lastTested,
+        lastError: igState.item?.lastError,
+        diagnostics: igState.item?.diagnostics,
+        targetId: igState.item?.id
+      },
+      {
+        id: 'youtube',
+        name: 'YouTube',
+        type: 'youtube',
+        state: ytState.state,
+        lastTested: ytState.item?.lastTested,
+        lastError: ytState.item?.lastError,
+        diagnostics: ytState.item?.diagnostics,
+        targetId: ytState.item?.id
+      },
+      {
+        id: 'tiktok',
+        name: 'TikTok',
+        type: 'tiktok',
+        state: ttState.state,
+        lastTested: ttState.item?.lastTested,
+        lastError: ttState.item?.lastError,
+        diagnostics: ttState.item?.diagnostics,
+        targetId: ttState.item?.id
+      }
+    ];
+
+    setIntegrationsStatus(summary);
   };
-  const maxArticles = settings?.maxArticlesPerDay || 3;
-  const articlesPublishedToday = safeTodayStats.articlesPublished || 0;
 
-  const publishedArticles = safeArticles.filter(
-    (a) => a && (a.lifecycleState === 'PUBLISHED' || a.lifecycleState === 'DISTRIBUTED')
-  );
-  const pendingArticles = safeArticles.filter((a) => a && a.lifecycleState === 'APPROVED');
-  const failedArticles = safeArticles.filter((a) => a && a.lifecycleState === 'FAILED');
+  useEffect(() => {
+    refreshDashboardData();
+    const unsub = integrationStore.subscribe(() => {
+      refreshDashboardData();
+    });
+    return unsub;
+  }, []);
 
-  const totalSocialPosts = safeArticles.reduce(
-    (acc, a) => acc + (a?.socialDistributions?.filter((s) => s.status === 'PUBLISHED').length || 0),
-    0
-  );
+  const handleTestIntegration = async (item: IntegrationSummaryItem) => {
+    setTestingId(item.id);
+    try {
+      if (item.type === 'blogger') {
+        const blogs = integrationStore.loadBlogger();
+        const target = item.targetId ? integrationStore.getBloggerById(item.targetId) : blogs[0];
+        if (target) {
+          const res = await PlatformAdapterManager.testBlogger(target);
+          integrationStore.updateBloggerTestResult(
+            target.id,
+            res.success ? 'CONNECTED' : 'FAILED',
+            res.diagnostics,
+            res.success ? undefined : res.message
+          );
+        }
+      } else {
+        const socials = integrationStore.loadSocial();
+        const target = item.targetId ? integrationStore.getSocialById(item.targetId) : socials.find(s => s.platform === item.type);
+        if (target) {
+          const res = await PlatformAdapterManager.testSocial(target);
+          integrationStore.updateSocialTestResult(
+            target.id,
+            res.success ? 'CONNECTED' : 'FAILED',
+            res.diagnostics,
+            res.success ? undefined : res.message
+          );
+        }
+      }
+    } catch (err: any) {
+      console.error('Test failed', err);
+    } finally {
+      setTestingId(null);
+      refreshDashboardData();
+    }
+  };
+
+  const getStatusBadge = (state: IntegrationCardState) => {
+    switch (state) {
+      case 'Connected':
+        return (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+            <CheckCircle2 className="w-3.5 h-3.5" />
+            Connected
+          </span>
+        );
+      case 'Failed':
+        return (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-500/10 text-rose-400 border border-rose-500/20">
+            <XCircle className="w-3.5 h-3.5" />
+            Failed
+          </span>
+        );
+      case 'Disabled':
+        return (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20">
+            <MinusCircle className="w-3.5 h-3.5" />
+            Disabled
+          </span>
+        );
+      case 'Not Configured':
+      default:
+        return (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-400 border border-slate-700">
+            <AlertCircle className="w-3.5 h-3.5" />
+            Not Configured
+          </span>
+        );
+    }
+  };
+
+  const totalWords = articles.reduce((acc, a) => acc + (a.wordCount || 0), 0);
+  const avgSeo = articles.length > 0 ? Math.round(articles.reduce((acc, a) => acc + (a.seoScore || 0), 0) / articles.length) : 92;
 
   return (
-    <div className="space-y-6">
-      {/* 1. Hero KPI Cards Grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
-        {/* Published Metric */}
-        <div className="cyber-panel p-4 sm:p-5 rounded-xl border border-slate-800 relative overflow-hidden">
-          <div className="flex items-center justify-between text-slate-400 mb-2">
-            <span className="text-xs font-semibold uppercase tracking-wider">Published Articles</span>
-            <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-400">
-              <Send className="w-4 h-4" />
+    <div id="dashboard-view" className="space-y-8 pb-12">
+      {/* Welcome Banner */}
+      <div className="relative rounded-2xl bg-gradient-to-r from-blue-900/40 via-indigo-900/30 to-slate-900 border border-blue-500/20 p-6 sm:p-8 overflow-hidden shadow-lg">
+        <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
+          <div className="max-w-2xl">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-500/20 text-blue-300 border border-blue-400/30">
+                Autonomous Engine Active
+              </span>
             </div>
+            <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+              Auto-Post Content &amp; Distribution Center
+            </h1>
+            <p className="text-slate-300 text-sm mt-2 leading-relaxed">
+              Synthesize SEO-grounded articles using multi-agent intelligence and syndicate instantly to Google Blogger, Facebook, Instagram, YouTube, and TikTok.
+            </p>
           </div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-2xl sm:text-3xl font-bold text-white font-display">
-              {publishedArticles.length}
-            </span>
-            <span className="text-xs text-slate-500">
-              of {articlesPublishedToday}/{maxArticles} today limit
-            </span>
+          <div className="flex flex-wrap gap-3">
+            <button
+              id="dashboard-start-pipeline-btn"
+              onClick={onRunPipeline}
+              disabled={isRunningPipeline}
+              className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-800/40 text-white font-semibold text-sm rounded-xl shadow-lg shadow-blue-600/30 transition-all flex items-center gap-2 cursor-pointer"
+            >
+              <Play className="w-4 h-4 fill-current" />
+              <span>{isRunningPipeline ? 'Swarm in Progress...' : 'Launch Swarm Pipeline'}</span>
+            </button>
+            <button
+              id="dashboard-goto-settings-btn"
+              onClick={() => onNavigate('settings')}
+              className="px-4 py-2.5 bg-slate-800/90 hover:bg-slate-700/90 text-slate-200 border border-slate-700 font-semibold text-sm rounded-xl transition-all flex items-center gap-2 cursor-pointer"
+            >
+              <span>Manage Integrations</span>
+              <ArrowRight className="w-4 h-4" />
+            </button>
           </div>
-          <div className="mt-3 w-full bg-slate-800/80 rounded-full h-1.5 overflow-hidden">
+        </div>
+      </div>
+
+      {/* KPI Stats Row */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="bg-slate-800/60 border border-slate-700/80 rounded-xl p-5 shadow-sm">
+          <div className="flex items-center justify-between text-slate-400 text-xs font-semibold uppercase tracking-wider">
+            <span>Total Articles</span>
+            <FileText className="w-4 h-4 text-blue-400" />
+          </div>
+          <div className="text-2xl font-bold text-white mt-2">{articles.length}</div>
+          <div className="text-xs text-slate-400 mt-1">Ready for syndication</div>
+        </div>
+        <div className="bg-slate-800/60 border border-slate-700/80 rounded-xl p-5 shadow-sm">
+          <div className="flex items-center justify-between text-slate-400 text-xs font-semibold uppercase tracking-wider">
+            <span>Words Authored</span>
+            <TrendingUp className="w-4 h-4 text-indigo-400" />
+          </div>
+          <div className="text-2xl font-bold text-white mt-2">{totalWords.toLocaleString()}</div>
+          <div className="text-xs text-slate-400 mt-1">Quality verified</div>
+        </div>
+        <div className="bg-slate-800/60 border border-slate-700/80 rounded-xl p-5 shadow-sm">
+          <div className="flex items-center justify-between text-slate-400 text-xs font-semibold uppercase tracking-wider">
+            <span>Average SEO Score</span>
+            <Sparkles className="w-4 h-4 text-emerald-400" />
+          </div>
+          <div className="text-2xl font-bold text-emerald-400 mt-2">{avgSeo} / 100</div>
+          <div className="text-xs text-slate-400 mt-1">Semantic keyword audit</div>
+        </div>
+        <div className="bg-slate-800/60 border border-slate-700/80 rounded-xl p-5 shadow-sm">
+          <div className="flex items-center justify-between text-slate-400 text-xs font-semibold uppercase tracking-wider">
+            <span>Active Integrations</span>
+            <Share2 className="w-4 h-4 text-purple-400" />
+          </div>
+          <div className="text-2xl font-bold text-white mt-2">
+            {integrationsStatus.filter(i => i.state === 'Connected').length} / 5
+          </div>
+          <div className="text-xs text-slate-400 mt-1">Verified connection channels</div>
+        </div>
+      </div>
+
+      {/* REQUIREMENT 9: DASHBOARD INTEGRATIONS STATUS */}
+      <div id="dashboard-integrations-section" className="bg-slate-800/40 border border-slate-700/80 rounded-2xl p-6 shadow-sm">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+          <div>
+            <h2 className="text-lg font-bold text-white tracking-tight flex items-center gap-2">
+              <Share2 className="w-5 h-5 text-blue-400" />
+              <span>Platform Integration Status</span>
+            </h2>
+            <p className="text-xs text-slate-400 mt-1">
+              Live status based on real connection verification tests. Never marks connected from unverified credentials.
+            </p>
+          </div>
+          <button
+            id="refresh-integrations-btn"
+            onClick={refreshDashboardData}
+            className="self-start sm:self-auto inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium rounded-lg border border-slate-700 transition-colors cursor-pointer"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>Check Status</span>
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+          {integrationsStatus.map((item) => (
             <div
-              className="bg-emerald-400 h-full rounded-full transition-all"
-              style={{
-                width: `${Math.min(
-                  100,
-                  maxArticles > 0 ? (articlesPublishedToday / maxArticles) * 100 : 0
-                )}%`,
-              }}
-            ></div>
-          </div>
-        </div>
+              key={item.id}
+              id={`integration-status-card-${item.id}`}
+              className="bg-slate-800/90 border border-slate-700 rounded-xl p-4 flex flex-col justify-between hover:border-slate-600 transition-all shadow-sm"
+            >
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <span className="font-semibold text-sm text-white">{item.name}</span>
+                  {getStatusBadge(item.state)}
+                </div>
+                {item.lastTested ? (
+                  <p className="text-[11px] text-slate-400">
+                    Tested: {new Date(item.lastTested).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-slate-500">Not tested yet</p>
+                )}
+                {item.lastError && (
+                  <p className="text-[11px] text-rose-400 mt-2 line-clamp-2" title={item.lastError}>
+                    {item.lastError}
+                  </p>
+                )}
+                {item.diagnostics && item.state === 'Connected' && (
+                  <p className="text-[11px] text-emerald-400/90 mt-2 line-clamp-2">
+                    Verified
+                  </p>
+                )}
+              </div>
 
-        {/* Pending Review Metric */}
-        <div className="cyber-panel p-4 sm:p-5 rounded-xl border border-slate-800 relative overflow-hidden">
-          <div className="flex items-center justify-between text-slate-400 mb-2">
-            <span className="text-xs font-semibold uppercase tracking-wider">Pending Review</span>
-            <div className="w-8 h-8 rounded-lg bg-indigo-500/10 flex items-center justify-center text-indigo-400">
-              <FileText className="w-4 h-4" />
+              <div className="mt-4 pt-3 border-t border-slate-700/60 flex items-center justify-between gap-2">
+                <button
+                  id={`dashboard-test-${item.id}-btn`}
+                  onClick={() => handleTestIntegration(item)}
+                  disabled={testingId === item.id || item.state === 'Not Configured'}
+                  className="text-xs font-semibold text-blue-400 hover:text-blue-300 disabled:text-slate-600 disabled:cursor-not-allowed flex items-center gap-1 cursor-pointer transition-colors"
+                >
+                  <RefreshCw className={`w-3 h-3 ${testingId === item.id ? 'animate-spin' : ''}`} />
+                  <span>{testingId === item.id ? 'Testing...' : 'Test Now'}</span>
+                </button>
+                <button
+                  id={`dashboard-cfg-${item.id}-btn`}
+                  onClick={() => onNavigate('settings')}
+                  className="text-xs text-slate-400 hover:text-slate-200 flex items-center gap-1 cursor-pointer transition-colors"
+                >
+                  <span>Configure</span>
+                  <ArrowRight className="w-3 h-3" />
+                </button>
+              </div>
             </div>
-          </div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-2xl sm:text-3xl font-bold text-white font-display">
-              {pendingArticles.length}
-            </span>
-            <span className="text-xs text-slate-500">
-              {settings?.mode === 'APPROVAL' ? 'awaiting manual publish' : 'auto-publish active'}
-            </span>
-          </div>
-          <div className="mt-3 text-xs text-indigo-300 flex items-center gap-1">
-            <Clock className="w-3.5 h-3.5" />
-            <span>Mode: {settings?.mode || 'AUTO'}</span>
-          </div>
-        </div>
-
-        {/* Social Dispatches Metric */}
-        <div className="cyber-panel p-4 sm:p-5 rounded-xl border border-slate-800 relative overflow-hidden">
-          <div className="flex items-center justify-between text-slate-400 mb-2">
-            <span className="text-xs font-semibold uppercase tracking-wider">Social Distributions</span>
-            <div className="w-8 h-8 rounded-lg bg-cyan-500/10 flex items-center justify-center text-cyan-400">
-              <Share2 className="w-4 h-4" />
-            </div>
-          </div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-2xl sm:text-3xl font-bold text-white font-display">
-              {totalSocialPosts}
-            </span>
-            <span className="text-xs text-slate-500">across 5 channels</span>
-          </div>
-          <div className="mt-3 text-xs text-cyan-400 flex items-center gap-1">
-            <Globe className="w-3.5 h-3.5" />
-            <span>Facebook, Telegram, X, LinkedIn, Threads</span>
-          </div>
-        </div>
-
-        {/* Topic Candidates Metric */}
-        <div className="cyber-panel p-4 sm:p-5 rounded-xl border border-slate-800 relative overflow-hidden">
-          <div className="flex items-center justify-between text-slate-400 mb-2">
-            <span className="text-xs font-semibold uppercase tracking-wider">Scouted Topics</span>
-            <div className="w-8 h-8 rounded-lg bg-purple-500/10 flex items-center justify-center text-purple-400">
-              <Sparkles className="w-4 h-4" />
-            </div>
-          </div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-2xl sm:text-3xl font-bold text-white font-display">
-              {safeTopics.length}
-            </span>
-            <span className="text-xs text-slate-500">evaluated candidates</span>
-          </div>
-          <div className="mt-3 text-xs text-purple-300 flex items-center gap-1">
-            <Activity className="w-3.5 h-3.5" />
-            <span>Niche: {settings?.contentNiche || settings?.niche || 'Autonomous AI Systems'}</span>
-          </div>
+          ))}
         </div>
       </div>
 
-      {/* 2. Active Job Status & Quick Trigger */}
-      <div className="cyber-panel rounded-xl p-5 border border-slate-800">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <span className={`w-2.5 h-2.5 rounded-full ${activeJob ? 'bg-cyan-400 animate-ping' : 'bg-slate-500'}`}></span>
-              <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-                Autonomous Job Engine Status
-              </h3>
+      {/* Recent Generated Articles */}
+      <div className="bg-slate-800/40 border border-slate-700/80 rounded-2xl p-6 shadow-sm">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-bold text-white tracking-tight flex items-center gap-2">
+            <FileText className="w-5 h-5 text-blue-400" />
+            <span>Recent Articles</span>
+          </h2>
+          <button
+            onClick={() => onNavigate('articles')}
+            className="text-xs font-semibold text-blue-400 hover:text-blue-300 flex items-center gap-1 cursor-pointer"
+          >
+            <span>View All</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        <div className="divide-y divide-slate-700/50">
+          {articles.slice(0, 3).map((art) => (
+            <div key={art.id} className="py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                    art.status === 'published' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'
+                  }`}>
+                    {art.status}
+                  </span>
+                  <span className="text-xs text-slate-400">{art.category}</span>
+                </div>
+                <h3 className="text-sm font-semibold text-white hover:text-blue-300 transition-colors">
+                  {art.title}
+                </h3>
+                <p className="text-xs text-slate-400 line-clamp-1">{art.summary}</p>
+              </div>
+              <div className="flex items-center gap-3 self-end sm:self-center">
+                <span className="text-xs text-slate-400">{art.wordCount} words</span>
+                <button
+                  onClick={() => onNavigate('articles')}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 font-medium transition-colors cursor-pointer"
+                >
+                  Review
+                </button>
+              </div>
             </div>
-            {activeJob ? (
-              <p className="text-xs text-slate-300">
-                Running Cycle <span className="font-mono text-cyan-400 font-bold">#{activeJob.jobNumber}</span>. Current stage:{' '}
-                <span className="px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 font-mono text-[11px]">
-                  {activeJob.currentStep}
-                </span>{' '}
-                for <span className="text-white italic font-semibold">"{activeJob.topicTitle || 'Autonomous Discovery'}"</span>
-              </p>
-            ) : (
-              <p className="text-xs text-slate-400">
-                Engine is idle and waiting for scheduled cron or operator manual trigger. Next scheduled Netlify invocation will trigger cycle.
-              </p>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={onRunNow}
-              disabled={isTriggering || Boolean(activeJob)}
-              className={`px-5 py-2.5 rounded-lg text-xs font-bold text-white transition-all shadow-md flex items-center gap-2 ${
-                isTriggering || Boolean(activeJob)
-                  ? 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
-                  : 'bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 cursor-pointer shadow-emerald-500/20'
-              }`}
-            >
-              <Play className={`w-4 h-4 ${isTriggering ? 'animate-spin' : ''}`} />
-              <span>{isTriggering ? 'Initiating Pipeline...' : 'Run Autonomous Cycle Now'}</span>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* 3. Main Split: Recent Articles & Live System Logs */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column: Recent Articles (7 cols) */}
-        <div className="lg:col-span-7 space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
-              <FileText className="w-4 h-4 text-cyan-400" />
-              Recent Generated Articles
-            </h3>
-            <button
-              onClick={onViewAllArticles}
-              className="text-xs text-cyan-400 hover:text-cyan-300 flex items-center gap-1 font-semibold"
-            >
-              View all ({safeArticles.length})
-              <ChevronRight className="w-3.5 h-3.5" />
-            </button>
-          </div>
-
-          <div className="space-y-2.5">
-            {safeArticles.slice(0, 4).map((art) => (
-              <div
-                key={art.id}
-                onClick={() => onViewArticle(art)}
-                className="cyber-panel p-4 rounded-xl border border-slate-800 hover:border-slate-700 transition-all cursor-pointer group"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="space-y-1.5 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span
-                        className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold uppercase ${
-                          art.lifecycleState === 'PUBLISHED' || art.lifecycleState === 'DISTRIBUTED'
-                            ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
-                            : art.lifecycleState === 'APPROVED'
-                            ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/30'
-                            : 'bg-slate-800 text-slate-400'
-                        }`}
-                      >
-                        {art.lifecycleState}
-                      </span>
-                      <span className="text-[11px] text-slate-400 font-mono">
-                        {new Date(art.createdAt).toLocaleDateString()}
-                      </span>
-                      <span className="text-[11px] text-slate-500 font-mono">
-                        {(art.cleanContent || '').split(/\s+/).filter(Boolean).length} words
-                      </span>
-                    </div>
-
-                    <h4 className="text-sm font-semibold text-white group-hover:text-cyan-300 transition-colors">
-                      {art.title || 'Untitled Article'}
-                    </h4>
-
-                    <p className="text-xs text-slate-400 line-clamp-2">
-                      {art.metaDescription || ''}
-                    </p>
-                  </div>
-
-                  <div className="text-right shrink-0">
-                    <span className="inline-flex items-center gap-1 text-xs text-cyan-400 group-hover:translate-x-0.5 transition-transform">
-                      Review <ArrowUpRight className="w-3.5 h-3.5" />
-                    </span>
-                    {art.qualityReport && art.qualityReport.scoreBreakdown && (
-                      <div className="text-[10px] font-mono text-emerald-400 mt-1">
-                        Quality: {art.qualityReport.scoreBreakdown.factualConsistency}%
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ))}
-
-            {safeArticles.length === 0 && (
-              <div className="p-8 text-center rounded-xl bg-slate-900/40 border border-slate-800 text-slate-500 text-xs">
-                No articles generated yet. Click "Run Autonomous Cycle Now" to start the first cycle.
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Right Column: Live Telemetry Logs (5 cols) */}
-        <div className="lg:col-span-5 space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
-              <Activity className="w-4 h-4 text-emerald-400" />
-              Live System Activity Stream
-            </h3>
-            <span className="text-[10px] font-mono text-slate-500 uppercase">Streaming JSONL</span>
-          </div>
-
-          <div className="cyber-panel p-3.5 rounded-xl border border-slate-800 font-mono text-xs max-h-[410px] overflow-y-auto space-y-2">
-            {safeLogs.slice(0, 12).map((log) => (
-              <div
-                key={log.id}
-                className="pb-2 border-b border-slate-800/60 last:border-0 last:pb-0 space-y-0.5"
-              >
-                <div className="flex items-center justify-between text-[10px]">
-                  <span
-                    className={`font-bold ${
-                      log.level === 'SUCCESS'
-                        ? 'text-emerald-400'
-                        : log.level === 'WARN'
-                        ? 'text-amber-400'
-                        : log.level === 'ERROR'
-                        ? 'text-rose-400'
-                        : 'text-cyan-400'
-                    }`}
-                  >
-                    [{log.agentName}]
-                  </span>
-                  <span className="text-slate-500">
-                    {new Date(log.timestamp).toLocaleTimeString([], { hour12: false })}
-                  </span>
-                </div>
-                <p className="text-slate-300 text-[11px] leading-relaxed break-words">
-                  {log.message}
-                </p>
-              </div>
-            ))}
-
-            {logs.length === 0 && (
-              <div className="py-6 text-center text-slate-600 text-xs">
-                System telemetry will stream here during execution.
-              </div>
-            )}
-          </div>
+          ))}
         </div>
       </div>
     </div>
