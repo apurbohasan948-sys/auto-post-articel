@@ -181,45 +181,52 @@ export const apiClient = {
 
   // Providers
   getAIProviders: async (): Promise<AIProviderConfig[]> => {
-    const res = await fetch('/api/providers/ai');
-    const data = await res.json();
-    return data.providers || [];
+    try {
+      const res = await fetch('/api/providers');
+      const data = await safeParseResponse<any>(res);
+      if (Array.isArray(data.providers)) return data.providers;
+    } catch {
+      // Fallback to legacy path
+    }
+    const res2 = await fetch('/api/providers/ai');
+    const data2 = await safeParseResponse<any>(res2);
+    return data2.providers || [];
   },
 
   saveAIProvider: async (provider: Partial<AIProviderConfig>): Promise<{ success: boolean; provider: AIProviderConfig }> => {
-    const res = await fetch('/api/providers/ai/save', {
+    const res = await fetch('/api/providers', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ provider }),
     });
     const data = await safeParseResponse<any>(res);
-    if (!res.ok) {
+    if (!res.ok || !data.success) {
       throw new Error(data.error || 'Failed to save AI provider');
     }
     return data;
   },
 
   deleteAIProvider: async (id: string): Promise<{ success: boolean }> => {
-    const res = await fetch(`/api/providers/ai/${id}`, { method: 'DELETE' });
-    return res.json();
+    const res = await fetch(`/api/providers/${id}`, { method: 'DELETE' });
+    return safeParseResponse<{ success: boolean }>(res);
   },
 
   reorderAIProviders: async (ids: string[]): Promise<{ success: boolean; providers: AIProviderConfig[] }> => {
-    const res = await fetch('/api/providers/ai/reorder', {
+    const res = await fetch('/api/providers/reorder', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids }),
     });
-    return res.json();
+    return safeParseResponse<{ success: boolean; providers: AIProviderConfig[] }>(res);
   },
 
   toggleAIProvider: async (id: string, enabled: boolean): Promise<{ success: boolean; provider: AIProviderConfig }> => {
-    const res = await fetch('/api/providers/ai/toggle', {
-      method: 'POST',
+    const res = await fetch(`/api/providers/${id}`, {
+      method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, enabled }),
+      body: JSON.stringify({ enabled }),
     });
-    return res.json();
+    return safeParseResponse<{ success: boolean; provider: AIProviderConfig }>(res);
   },
 
   testAIProvider: async (params: { providerId?: string; provider?: AIProviderConfig; prompt?: string }): Promise<AITestResult> => {
@@ -255,6 +262,13 @@ export const apiClient = {
   },
 
   getSearchProviders: async (): Promise<SearchProviderConfig[]> => {
+    try {
+      const res = await fetch('/api/search-providers');
+      const data = await safeParseResponse<any>(res);
+      if (Array.isArray(data.providers)) return data.providers;
+    } catch {
+      // Fallback
+    }
     const data = await safeJsonFetch<{ providers?: SearchProviderConfig[] }>('/api/providers/search');
     return data.providers || [];
   },
@@ -262,39 +276,42 @@ export const apiClient = {
   saveSearchProvider: async (
     provider: Partial<SearchProviderConfig>
   ): Promise<{ success: boolean; provider: SearchProviderConfig }> => {
-    const res = await fetch('/api/providers/search/save', {
+    const res = await fetch('/api/search-providers', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ provider }),
     });
     const data = await safeParseResponse<any>(res);
-    if (!res.ok) {
+    if (!res.ok || !data.success) {
       throw new Error(data.error || 'Failed to save search provider');
     }
     return data;
   },
 
   deleteSearchProvider: async (id: string): Promise<{ success: boolean }> => {
-    return safeJsonFetch<{ success: boolean }>(`/api/providers/search/${id}`, { method: 'DELETE' });
+    const res = await fetch(`/api/search-providers/${id}`, { method: 'DELETE' });
+    return safeParseResponse<{ success: boolean }>(res);
   },
 
   reorderSearchProviders: async (ids: string[]): Promise<{ success: boolean; providers: SearchProviderConfig[] }> => {
-    return safeJsonFetch<{ success: boolean; providers: SearchProviderConfig[] }>('/api/providers/search/reorder', {
+    const res = await fetch('/api/search-providers/reorder', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids }),
     });
+    return safeParseResponse<{ success: boolean; providers: SearchProviderConfig[] }>(res);
   },
 
   toggleSearchProvider: async (
     id: string,
     enabled: boolean
   ): Promise<{ success: boolean; provider: SearchProviderConfig }> => {
-    return safeJsonFetch<{ success: boolean; provider: SearchProviderConfig }>('/api/providers/search/toggle', {
-      method: 'POST',
+    const res = await fetch(`/api/search-providers/${id}`, {
+      method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, enabled }),
+      body: JSON.stringify({ enabled }),
     });
+    return safeParseResponse<{ success: boolean; provider: SearchProviderConfig }>(res);
   },
 
   testSearchProvider: async (params: {

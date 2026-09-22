@@ -270,6 +270,7 @@ export interface SearchProviderConfig {
   baseUrl: string;
   searchDepth?: 'basic' | 'advanced';
   maxResults?: number;
+  maxRetries?: number;
   topic?: string;
   timeoutMs?: number;
   includeDomains?: string[];

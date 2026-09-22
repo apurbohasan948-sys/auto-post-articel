@@ -123,19 +123,29 @@ export const handler = async (event: any) => {
     }
 
     // --- API Control Center Routes ---
-    if (path === '/providers/ai' && method === 'GET') {
+    if ((path === '/providers' || path === '/providers/ai') && method === 'GET') {
       const providers = storage.getAIProviders().map((p) => ({
         ...p,
+        id: p.id,
+        name: p.name,
+        type: p.type,
+        baseUrl: p.baseUrl || '',
+        base_url: p.baseUrl || '',
+        model: p.modelName || p.defaultModel || 'gpt-4o',
+        modelName: p.modelName || p.defaultModel || 'gpt-4o',
+        defaultModel: p.defaultModel || p.modelName || 'gpt-4o',
+        enabled: Boolean(p.enabled),
+        priority: p.priority ?? 1,
         apiKey: maskApiKey(p.apiKey),
         hasKey: Boolean(p.apiKey),
       }));
-      return { statusCode: 200, headers, body: JSON.stringify({ providers }) };
+      return { statusCode: 200, headers, body: JSON.stringify({ success: true, providers }) };
     }
 
-    if (path === '/providers/ai/save' && method === 'POST') {
-      const provider = body.provider;
-      if (!provider || !provider.name) {
-        return { statusCode: 400, headers, body: JSON.stringify({ error: 'Invalid provider payload' }) };
+    if ((path === '/providers' || path === '/providers/ai' || path === '/providers/ai/save') && method === 'POST') {
+      const provider = body.provider || body;
+      if (!provider || !provider.name || typeof provider.name !== 'string' || !provider.name.trim()) {
+        return { statusCode: 400, headers, body: JSON.stringify({ success: false, error: 'Provider name is required' }) };
       }
       const existing = storage.getAIProviders().find((p) => p.id === provider.id);
       let finalKey = provider.apiKey;
@@ -144,24 +154,108 @@ export const handler = async (event: any) => {
       } else {
         finalKey = existing?.apiKey || '';
       }
-      const saved = storage.saveAIProvider({ ...provider, apiKey: finalKey, hasKey: Boolean(finalKey) });
+      const saved = storage.saveAIProvider({
+        ...provider,
+        id: provider.id,
+        modelName: provider.modelName || provider.model || provider.defaultModel || 'gpt-4o',
+        baseUrl: provider.baseUrl || provider.base_url || '',
+        apiKey: finalKey,
+        hasKey: Boolean(finalKey),
+      });
       return {
         statusCode: 200,
         headers,
         body: JSON.stringify({
           success: true,
-          provider: { ...saved, apiKey: maskApiKey(saved.apiKey), hasKey: Boolean(saved.apiKey) },
+          provider: {
+            ...saved,
+            baseUrl: saved.baseUrl,
+            base_url: saved.baseUrl,
+            model: saved.modelName,
+            modelName: saved.modelName,
+            apiKey: maskApiKey(saved.apiKey),
+            hasKey: Boolean(saved.apiKey),
+          },
         }),
       };
     }
 
-    if (path.startsWith('/providers/ai/') && method === 'DELETE') {
-      const id = path.split('/')[3];
-      const success = storage.deleteAIProvider(id);
-      return { statusCode: 200, headers, body: JSON.stringify({ success }) };
+    if (((path.startsWith('/providers/') && !path.startsWith('/providers/search') && !path.startsWith('/providers/ai/')) || path.startsWith('/providers/ai/')) && method === 'PUT') {
+      const id = path.split('/')[path.startsWith('/providers/ai/') ? 3 : 2];
+      const provider = body.provider || body;
+      const existing = storage.getAIProviders().find((p) => p.id === id);
+      let finalKey = provider.apiKey;
+      if (finalKey && !finalKey.includes('••••')) {
+        finalKey = encryptSecret(finalKey);
+      } else {
+        finalKey = existing?.apiKey || '';
+      }
+      const saved = storage.saveAIProvider({
+        ...provider,
+        id,
+        apiKey: finalKey,
+        hasKey: Boolean(finalKey),
+      });
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          success: true,
+          provider: {
+            ...saved,
+            baseUrl: saved.baseUrl,
+            base_url: saved.baseUrl,
+            model: saved.modelName,
+            modelName: saved.modelName,
+            apiKey: maskApiKey(saved.apiKey),
+            hasKey: Boolean(saved.apiKey),
+          },
+        }),
+      };
     }
 
-    if (path === '/providers/ai/reorder' && method === 'POST') {
+    if (((path.startsWith('/providers/') && !path.startsWith('/providers/search') && !path.startsWith('/providers/ai/')) || path.startsWith('/providers/ai/')) && method === 'PATCH') {
+      const id = path.split('/')[path.startsWith('/providers/ai/') ? 3 : 2];
+      const patch = body || {};
+      const current = storage.getAIProviders().find((p) => p.id === id);
+      if (!current) {
+        return { statusCode: 404, headers, body: JSON.stringify({ success: false, error: 'Provider not found' }) };
+      }
+      let finalKey = current.apiKey;
+      if (patch.apiKey && !patch.apiKey.includes('••••')) {
+        finalKey = encryptSecret(patch.apiKey);
+      }
+      const updated = storage.saveAIProvider({
+        ...current,
+        ...patch,
+        id,
+        apiKey: finalKey,
+      });
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          success: true,
+          provider: {
+            ...updated,
+            baseUrl: updated.baseUrl,
+            base_url: updated.baseUrl,
+            model: updated.modelName,
+            modelName: updated.modelName,
+            apiKey: maskApiKey(updated.apiKey),
+            hasKey: Boolean(updated.apiKey),
+          },
+        }),
+      };
+    }
+
+    if (((path.startsWith('/providers/') && !path.startsWith('/providers/search') && !path.startsWith('/providers/ai/')) || path.startsWith('/providers/ai/')) && method === 'DELETE') {
+      const id = path.split('/')[path.startsWith('/providers/ai/') ? 3 : 2];
+      const success = storage.deleteAIProvider(id);
+      return { statusCode: 200, headers, body: JSON.stringify({ success, deletedId: id }) };
+    }
+
+    if ((path === '/providers/reorder' || path === '/providers/ai/reorder') && method === 'POST') {
       if (!Array.isArray(body.ids)) return { statusCode: 400, headers, body: JSON.stringify({ error: 'ids array required' }) };
       storage.reorderAIProviders(body.ids);
       const providers = storage.getAIProviders().map((p) => ({
@@ -239,19 +333,26 @@ export const handler = async (event: any) => {
       };
     }
 
-    if (path === '/providers/search' && method === 'GET') {
+    if ((path === '/search-providers' || path === '/providers/search') && method === 'GET') {
       const providers = storage.getSearchProviders().map((p) => ({
         ...p,
+        id: p.id,
+        name: p.name,
+        type: p.type,
+        baseUrl: p.baseUrl || 'https://api.tavily.com',
+        base_url: p.baseUrl || 'https://api.tavily.com',
+        enabled: Boolean(p.enabled),
+        priority: p.priority ?? 1,
         apiKey: maskApiKey(p.apiKey),
         hasKey: Boolean(p.apiKey),
       }));
-      return { statusCode: 200, headers, body: JSON.stringify({ providers }) };
+      return { statusCode: 200, headers, body: JSON.stringify({ success: true, providers }) };
     }
 
-    if (path === '/providers/search/save' && method === 'POST') {
-      const provider = body.provider;
-      if (!provider || !provider.name) {
-        return { statusCode: 400, headers, body: JSON.stringify({ error: 'Invalid search provider payload' }) };
+    if ((path === '/search-providers' || path === '/providers/search' || path === '/providers/search/save') && method === 'POST') {
+      const provider = body.provider || body;
+      if (!provider || !provider.name || typeof provider.name !== 'string' || !provider.name.trim()) {
+        return { statusCode: 400, headers, body: JSON.stringify({ success: false, error: 'Search provider name is required' }) };
       }
       const existing = storage.getSearchProviders().find((p) => p.id === provider.id);
       let finalKey = provider.apiKey;
@@ -260,24 +361,104 @@ export const handler = async (event: any) => {
       } else {
         finalKey = existing?.apiKey || '';
       }
-      const saved = storage.saveSearchProvider({ ...provider, apiKey: finalKey, hasKey: Boolean(finalKey) });
+      const saved = storage.saveSearchProvider({
+        ...provider,
+        id: provider.id,
+        baseUrl: provider.baseUrl || provider.base_url || 'https://api.tavily.com',
+        apiKey: finalKey,
+        hasKey: Boolean(finalKey),
+      });
       return {
         statusCode: 200,
         headers,
         body: JSON.stringify({
           success: true,
-          provider: { ...saved, apiKey: maskApiKey(saved.apiKey), hasKey: Boolean(saved.apiKey) },
+          provider: {
+            ...saved,
+            baseUrl: saved.baseUrl,
+            base_url: saved.baseUrl,
+            apiKey: maskApiKey(saved.apiKey),
+            hasKey: Boolean(saved.apiKey),
+          },
         }),
       };
     }
 
-    if (path.startsWith('/providers/search/') && method === 'DELETE') {
-      const id = path.split('/')[3];
-      const success = storage.deleteSearchProvider(id);
-      return { statusCode: 200, headers, body: JSON.stringify({ success }) };
+    if ((path.startsWith('/search-providers/') || (path.startsWith('/providers/search/') && !path.endsWith('/test'))) && method === 'PUT') {
+      const parts = path.split('/');
+      const id = path.startsWith('/search-providers/') ? parts[2] : parts[3];
+      const provider = body.provider || body;
+      const existing = storage.getSearchProviders().find((p) => p.id === id);
+      let finalKey = provider.apiKey;
+      if (finalKey && !finalKey.includes('••••')) {
+        finalKey = encryptSecret(finalKey);
+      } else {
+        finalKey = existing?.apiKey || '';
+      }
+      const saved = storage.saveSearchProvider({
+        ...provider,
+        id,
+        apiKey: finalKey,
+        hasKey: Boolean(finalKey),
+      });
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          success: true,
+          provider: {
+            ...saved,
+            baseUrl: saved.baseUrl,
+            base_url: saved.baseUrl,
+            apiKey: maskApiKey(saved.apiKey),
+            hasKey: Boolean(saved.apiKey),
+          },
+        }),
+      };
     }
 
-    if (path === '/providers/search/reorder' && method === 'POST') {
+    if ((path.startsWith('/search-providers/') || (path.startsWith('/providers/search/') && !path.endsWith('/test'))) && method === 'PATCH') {
+      const parts = path.split('/');
+      const id = path.startsWith('/search-providers/') ? parts[2] : parts[3];
+      const patch = body || {};
+      const current = storage.getSearchProviders().find((p) => p.id === id);
+      if (!current) {
+        return { statusCode: 404, headers, body: JSON.stringify({ success: false, error: 'Search provider not found' }) };
+      }
+      let finalKey = current.apiKey;
+      if (patch.apiKey && !patch.apiKey.includes('••••')) {
+        finalKey = encryptSecret(patch.apiKey);
+      }
+      const updated = storage.saveSearchProvider({
+        ...current,
+        ...patch,
+        id,
+        apiKey: finalKey,
+      });
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          success: true,
+          provider: {
+            ...updated,
+            baseUrl: updated.baseUrl,
+            base_url: updated.baseUrl,
+            apiKey: maskApiKey(updated.apiKey),
+            hasKey: Boolean(updated.apiKey),
+          },
+        }),
+      };
+    }
+
+    if ((path.startsWith('/search-providers/') || (path.startsWith('/providers/search/') && !path.endsWith('/test'))) && method === 'DELETE') {
+      const parts = path.split('/');
+      const id = path.startsWith('/search-providers/') ? parts[2] : parts[3];
+      const success = storage.deleteSearchProvider(id);
+      return { statusCode: 200, headers, body: JSON.stringify({ success, deletedId: id }) };
+    }
+
+    if ((path === '/search-providers/reorder' || path === '/providers/search/reorder') && method === 'POST') {
       if (!Array.isArray(body.ids)) return { statusCode: 400, headers, body: JSON.stringify({ error: 'ids array required' }) };
       storage.reorderSearchProviders(body.ids);
       const providers = storage.getSearchProviders().map((p) => ({

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Header } from './components/Header.tsx';
 import { Navigation, NavTab } from './components/Navigation.tsx';
 import { DashboardView } from './components/DashboardView.tsx';
@@ -95,6 +95,9 @@ export default function App() {
   const [isArticleActionLoading, setIsArticleActionLoading] = useState(false);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
+  const lastAiSaveTimeRef = useRef<number>(0);
+  const lastSearchSaveTimeRef = useRef<number>(0);
+
   const showToast = (message: string, type: 'success' | 'error' = 'success') => {
     setNotification({ message, type });
     setTimeout(() => setNotification(null), 4000);
@@ -102,6 +105,7 @@ export default function App() {
 
   // Master Data Refresh
   const loadData = useCallback(async () => {
+    const fetchStartTime = Date.now();
     try {
       const [
         statusRes,
@@ -146,8 +150,16 @@ export default function App() {
       if (analyticsRes.status === 'fulfilled') setAnalytics(analyticsRes.value);
       if (memoryRes.status === 'fulfilled') setMemory(memoryRes.value);
       if (settingsRes.status === 'fulfilled') setSettings(settingsRes.value);
-      if (aiRes.status === 'fulfilled') setAiProviders(aiRes.value);
-      if (searchRes.status === 'fulfilled') setSearchProviders(searchRes.value);
+      if (aiRes.status === 'fulfilled') {
+        if (fetchStartTime >= lastAiSaveTimeRef.current) {
+          setAiProviders(aiRes.value);
+        }
+      }
+      if (searchRes.status === 'fulfilled') {
+        if (fetchStartTime >= lastSearchSaveTimeRef.current) {
+          setSearchProviders(searchRes.value);
+        }
+      }
       if (bloggerRes.status === 'fulfilled') setBloggerConfig(bloggerRes.value);
       if (healthRes.status === 'fulfilled') setHealth(healthRes.value.providers);
     } catch (err) {
@@ -285,27 +297,15 @@ export default function App() {
     }
   };
 
-  const handleUpdateAI = async (providers: AIProviderConfig[]) => {
-    try {
-      await apiClient.updateAIProviders(providers);
-      setAiProviders(providers);
-      showToast('AI Providers configuration saved.');
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      showToast(msg, 'error');
-    }
-  };
+  const handleUpdateAI = useCallback((providers: AIProviderConfig[]) => {
+    lastAiSaveTimeRef.current = Date.now();
+    setAiProviders(providers);
+  }, []);
 
-  const handleUpdateSearch = async (providers: SearchProviderConfig[]) => {
-    try {
-      await apiClient.updateSearchProviders(providers);
-      setSearchProviders(providers);
-      showToast('Tavily Search configuration saved.');
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      showToast(msg, 'error');
-    }
-  };
+  const handleUpdateSearch = useCallback((providers: SearchProviderConfig[]) => {
+    lastSearchSaveTimeRef.current = Date.now();
+    setSearchProviders(providers);
+  }, []);
 
   const handleUpdateBlogger = async (cfg: BloggerConfig) => {
     try {

@@ -94,11 +94,28 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({
   // --- AI Provider Actions ---
   const handleSaveAiProvider = async (provider: AIProviderConfig) => {
     try {
+      // Step 1 & 2: POST provider and receive provider ID
       const res = await apiClient.saveAIProvider(provider);
-      if (res.success) {
-        showToast(`AI Provider "${provider.name}" saved!`);
-        await refreshAllData();
+      const savedId = res?.provider?.id;
+      if (!res?.success || !savedId) {
+        throw new Error('Provider could not be verified after save.');
       }
+
+      // Step 3: Immediately GET /api/providers
+      const verifiedList = await apiClient.getAIProviders();
+
+      // Step 4: Confirm the new provider exists in database
+      const verified = verifiedList.some((p) => p.id === savedId);
+      if (!verified) {
+        throw new Error('Provider could not be verified after save.');
+      }
+
+      // Only then show confirmation
+      showToast('Provider saved successfully.');
+      setAiList(verifiedList);
+      onUpdateAI(verifiedList);
+      setIsAiModalOpen(false);
+      setEditingAi(null);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       showToast(msg, 'error');
@@ -186,11 +203,28 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({
   // --- Search Provider Actions ---
   const handleSaveSearchProvider = async (provider: SearchProviderConfig) => {
     try {
+      // Step 1 & 2: POST provider and receive provider ID
       const res = await apiClient.saveSearchProvider(provider);
-      if (res.success) {
-        showToast(`Search Provider "${provider.name}" saved!`);
-        await refreshAllData();
+      const savedId = res?.provider?.id;
+      if (!res?.success || !savedId) {
+        throw new Error('Provider could not be verified after save.');
       }
+
+      // Step 3: Immediately GET search providers
+      const verifiedList = await apiClient.getSearchProviders();
+
+      // Step 4: Confirm the new provider exists in database
+      const verified = verifiedList.some((p) => p.id === savedId);
+      if (!verified) {
+        throw new Error('Provider could not be verified after save.');
+      }
+
+      // Only then show confirmation
+      showToast('Provider saved successfully.');
+      setSearchList(verifiedList);
+      onUpdateSearch(verifiedList);
+      setIsSearchModalOpen(false);
+      setEditingSearch(null);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       showToast(msg, 'error');

@@ -199,6 +199,16 @@ app.put('/api/settings', (req: Request, res: Response) => {
 function getMaskedAIProviders() {
   return storage.getAIProviders().map((p) => ({
     ...p,
+    id: p.id,
+    name: p.name,
+    type: p.type,
+    baseUrl: p.baseUrl || '',
+    base_url: p.baseUrl || '',
+    model: p.modelName || p.defaultModel || 'gpt-4o',
+    modelName: p.modelName || p.defaultModel || 'gpt-4o',
+    defaultModel: p.defaultModel || p.modelName || 'gpt-4o',
+    enabled: Boolean(p.enabled),
+    priority: p.priority ?? 1,
     apiKey: maskApiKey(p.apiKey),
     hasKey: Boolean(p.apiKey),
   }));
@@ -207,23 +217,35 @@ function getMaskedAIProviders() {
 function getMaskedSearchProviders() {
   return storage.getSearchProviders().map((p) => ({
     ...p,
+    id: p.id,
+    name: p.name,
+    type: p.type,
+    baseUrl: p.baseUrl || 'https://api.tavily.com',
+    base_url: p.baseUrl || 'https://api.tavily.com',
+    enabled: Boolean(p.enabled),
+    priority: p.priority ?? 1,
     apiKey: maskApiKey(p.apiKey),
     hasKey: Boolean(p.apiKey),
   }));
 }
 
-// 7.1 AI Providers
-app.get('/api/providers/ai', (req: Request, res: Response) => {
-  res.json({ providers: getMaskedAIProviders() });
-});
+// 7.1 AI Providers - Full RESTful API (GET, POST, PUT, DELETE, PATCH)
+const handleGetAIProviders = (req: Request, res: Response) => {
+  const providers = getMaskedAIProviders();
+  res.json({ success: true, providers });
+};
 
-app.post('/api/providers/ai/save', (req: Request, res: Response) => {
-  const { provider } = req.body;
-  if (!provider || !provider.name) {
-    return res.status(400).json({ error: 'Invalid provider payload' });
+app.get('/api/providers', handleGetAIProviders);
+app.get('/api/providers/ai', handleGetAIProviders);
+
+const handleSaveAIProvider = (req: Request, res: Response) => {
+  const provider = req.body?.provider || req.body;
+  if (!provider || !provider.name || typeof provider.name !== 'string' || !provider.name.trim()) {
+    return res.status(400).json({ success: false, error: 'Provider name is required and cannot be empty' });
   }
 
-  const existing = storage.getAIProviders().find((p) => p.id === provider.id);
+  const existingId = req.params?.id || provider.id;
+  const existing = existingId ? storage.getAIProviders().find((p) => p.id === existingId) : undefined;
   let finalKey = provider.apiKey;
 
   // If user entered a new unmasked key, encrypt it
@@ -236,31 +258,91 @@ app.post('/api/providers/ai/save', (req: Request, res: Response) => {
 
   const saved = storage.saveAIProvider({
     ...provider,
+    id: existingId || provider.id,
+    modelName: provider.modelName || provider.model || provider.defaultModel || 'gpt-4o',
+    baseUrl: provider.baseUrl || provider.base_url || '',
     apiKey: finalKey,
     hasKey: Boolean(finalKey),
+  });
+
+  const responseProvider = {
+    ...saved,
+    baseUrl: saved.baseUrl,
+    base_url: saved.baseUrl,
+    model: saved.modelName,
+    modelName: saved.modelName,
+    apiKey: maskApiKey(saved.apiKey),
+    hasKey: Boolean(saved.apiKey),
+  };
+
+  res.status(200).json({
+    success: true,
+    provider: responseProvider,
+  });
+};
+
+app.post('/api/providers', handleSaveAIProvider);
+app.post('/api/providers/ai', handleSaveAIProvider);
+app.post('/api/providers/ai/save', handleSaveAIProvider);
+
+// Update existing AI provider by ID
+app.put('/api/providers/:id', handleSaveAIProvider);
+app.put('/api/providers/ai/:id', handleSaveAIProvider);
+
+// Delete AI provider by ID
+const handleDeleteAIProvider = (req: Request, res: Response) => {
+  const id = req.params.id;
+  const success = storage.deleteAIProvider(id);
+  res.json({ success, deletedId: id });
+};
+app.delete('/api/providers/:id', handleDeleteAIProvider);
+app.delete('/api/providers/ai/:id', handleDeleteAIProvider);
+
+// Patch / Partial update AI provider by ID (e.g. toggle enabled, change priority, model)
+const handlePatchAIProvider = (req: Request, res: Response) => {
+  const id = req.params.id;
+  const patch = req.body || {};
+  const current = storage.getAIProviders().find((p) => p.id === id);
+  if (!current) {
+    return res.status(404).json({ success: false, error: `Provider ${id} not found` });
+  }
+
+  let finalKey = current.apiKey;
+  if (patch.apiKey && !patch.apiKey.includes('••••')) {
+    finalKey = encryptSecret(patch.apiKey);
+  }
+
+  const updated = storage.saveAIProvider({
+    ...current,
+    ...patch,
+    id,
+    apiKey: finalKey,
   });
 
   res.json({
     success: true,
     provider: {
-      ...saved,
-      apiKey: maskApiKey(saved.apiKey),
-      hasKey: Boolean(saved.apiKey),
+      ...updated,
+      baseUrl: updated.baseUrl,
+      base_url: updated.baseUrl,
+      model: updated.modelName,
+      modelName: updated.modelName,
+      apiKey: maskApiKey(updated.apiKey),
+      hasKey: Boolean(updated.apiKey),
     },
   });
-});
+};
+app.patch('/api/providers/:id', handlePatchAIProvider);
+app.patch('/api/providers/ai/:id', handlePatchAIProvider);
 
-app.delete('/api/providers/ai/:id', (req: Request, res: Response) => {
-  const success = storage.deleteAIProvider(req.params.id);
-  res.json({ success });
-});
-
-app.post('/api/providers/ai/reorder', (req: Request, res: Response) => {
+const handleReorderAI = (req: Request, res: Response) => {
   const { ids } = req.body;
   if (!Array.isArray(ids)) return res.status(400).json({ error: 'ids array required' });
   storage.reorderAIProviders(ids);
   res.json({ success: true, providers: getMaskedAIProviders() });
-});
+};
+app.post('/api/providers/reorder', handleReorderAI);
+app.post('/api/providers/ai/reorder', handleReorderAI);
 
 app.post('/api/providers/ai/toggle', (req: Request, res: Response) => {
   const { id, enabled } = req.body;
@@ -382,18 +464,21 @@ app.put('/api/providers/ai', (req: Request, res: Response) => {
   res.json({ success: true });
 });
 
-// 7.2 Search / Research Providers
-app.get('/api/providers/search', (req: Request, res: Response) => {
-  res.json({ providers: getMaskedSearchProviders() });
-});
+// 7.2 Search / Research Providers - Full RESTful API
+const handleGetSearchProviders = (req: Request, res: Response) => {
+  res.json({ success: true, providers: getMaskedSearchProviders() });
+};
+app.get('/api/search-providers', handleGetSearchProviders);
+app.get('/api/providers/search', handleGetSearchProviders);
 
-app.post('/api/providers/search/save', (req: Request, res: Response) => {
-  const { provider } = req.body;
-  if (!provider || !provider.name) {
-    return res.status(400).json({ error: 'Invalid search provider payload' });
+const handleSaveSearchProvider = (req: Request, res: Response) => {
+  const provider = req.body?.provider || req.body;
+  if (!provider || !provider.name || typeof provider.name !== 'string' || !provider.name.trim()) {
+    return res.status(400).json({ success: false, error: 'Search provider name is required and cannot be empty' });
   }
 
-  const existing = storage.getSearchProviders().find((p) => p.id === provider.id);
+  const existingId = req.params?.id || provider.id;
+  const existing = existingId ? storage.getSearchProviders().find((p) => p.id === existingId) : undefined;
   let finalKey = provider.apiKey;
 
   if (finalKey && !finalKey.includes('••••')) {
@@ -404,31 +489,86 @@ app.post('/api/providers/search/save', (req: Request, res: Response) => {
 
   const saved = storage.saveSearchProvider({
     ...provider,
+    id: existingId || provider.id,
+    baseUrl: provider.baseUrl || provider.base_url || 'https://api.tavily.com',
     apiKey: finalKey,
     hasKey: Boolean(finalKey),
+  });
+
+  const responseProvider = {
+    ...saved,
+    baseUrl: saved.baseUrl,
+    base_url: saved.baseUrl,
+    apiKey: maskApiKey(saved.apiKey),
+    hasKey: Boolean(saved.apiKey),
+  };
+
+  res.status(200).json({
+    success: true,
+    provider: responseProvider,
+  });
+};
+
+app.post('/api/search-providers', handleSaveSearchProvider);
+app.post('/api/providers/search', handleSaveSearchProvider);
+app.post('/api/providers/search/save', handleSaveSearchProvider);
+
+// Update search provider by ID
+app.put('/api/search-providers/:id', handleSaveSearchProvider);
+app.put('/api/providers/search/:id', handleSaveSearchProvider);
+
+// Delete search provider by ID
+const handleDeleteSearchProvider = (req: Request, res: Response) => {
+  const id = req.params.id;
+  const success = storage.deleteSearchProvider(id);
+  res.json({ success, deletedId: id });
+};
+app.delete('/api/search-providers/:id', handleDeleteSearchProvider);
+app.delete('/api/providers/search/:id', handleDeleteSearchProvider);
+
+// Patch search provider by ID (e.g. toggle enabled, change priority)
+const handlePatchSearchProvider = (req: Request, res: Response) => {
+  const id = req.params.id;
+  const patch = req.body || {};
+  const current = storage.getSearchProviders().find((p) => p.id === id);
+  if (!current) {
+    return res.status(404).json({ success: false, error: `Search provider ${id} not found` });
+  }
+
+  let finalKey = current.apiKey;
+  if (patch.apiKey && !patch.apiKey.includes('••••')) {
+    finalKey = encryptSecret(patch.apiKey);
+  }
+
+  const updated = storage.saveSearchProvider({
+    ...current,
+    ...patch,
+    id,
+    apiKey: finalKey,
   });
 
   res.json({
     success: true,
     provider: {
-      ...saved,
-      apiKey: maskApiKey(saved.apiKey),
-      hasKey: Boolean(saved.apiKey),
+      ...updated,
+      baseUrl: updated.baseUrl,
+      base_url: updated.baseUrl,
+      apiKey: maskApiKey(updated.apiKey),
+      hasKey: Boolean(updated.apiKey),
     },
   });
-});
+};
+app.patch('/api/search-providers/:id', handlePatchSearchProvider);
+app.patch('/api/providers/search/:id', handlePatchSearchProvider);
 
-app.delete('/api/providers/search/:id', (req: Request, res: Response) => {
-  const success = storage.deleteSearchProvider(req.params.id);
-  res.json({ success });
-});
-
-app.post('/api/providers/search/reorder', (req: Request, res: Response) => {
+const handleReorderSearch = (req: Request, res: Response) => {
   const { ids } = req.body;
   if (!Array.isArray(ids)) return res.status(400).json({ error: 'ids array required' });
   storage.reorderSearchProviders(ids);
   res.json({ success: true, providers: getMaskedSearchProviders() });
-});
+};
+app.post('/api/search-providers/reorder', handleReorderSearch);
+app.post('/api/providers/search/reorder', handleReorderSearch);
 
 app.post('/api/providers/search/toggle', (req: Request, res: Response) => {
   const { id, enabled } = req.body;

@@ -6,6 +6,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { DatabaseEngine } from './db.ts';
 import {
   AgentJob,
   AgentMemory,
@@ -626,6 +627,34 @@ export class StorageService {
       this.dataDir = '/tmp';
       this.dataFilePath = path.join('/tmp', 'axiom_store.json');
     }
+
+    // Seed SQLite from persistent JSON store if needed
+    this.seedSqliteIfNeeded();
+  }
+
+  private seedSqliteIfNeeded(): void {
+    try {
+      const db = DatabaseEngine.getInstance();
+      const sqliteAI = db.getAllAIProvidersSql();
+      const store = this.load();
+
+      if (sqliteAI && sqliteAI.length === 0 && store.aiProviders.length > 0) {
+        console.log('[Storage] Seeding SQLite database from initial AI providers...');
+        for (const p of store.aiProviders) {
+          db.saveAIProviderSql(p);
+        }
+      }
+
+      const sqliteSearch = db.getAllSearchProvidersSql();
+      if (sqliteSearch && sqliteSearch.length === 0 && store.searchProviders.length > 0) {
+        console.log('[Storage] Seeding SQLite database from initial Search providers...');
+        for (const p of store.searchProviders) {
+          db.saveSearchProviderSql(p);
+        }
+      }
+    } catch (err) {
+      console.warn('[Storage] SQLite sync warning:', err);
+    }
   }
 
   public static getInstance(): StorageService {
@@ -636,10 +665,6 @@ export class StorageService {
   }
 
   private load(): StoreData {
-    if (this.memoryCache) {
-      return this.memoryCache;
-    }
-
     try {
       if (fs.existsSync(this.dataFilePath)) {
         const raw = fs.readFileSync(this.dataFilePath, 'utf-8');
@@ -649,7 +674,11 @@ export class StorageService {
         return parsed;
       }
     } catch (err) {
-      console.warn('[Storage] Failed to read store file, falling back to seed:', err);
+      console.warn('[Storage] Failed to read store file, falling back to cache or seed:', err);
+    }
+
+    if (this.memoryCache) {
+      return this.memoryCache;
     }
 
     // Initialize with Seed Data
@@ -749,6 +778,13 @@ export class StorageService {
 
   // --- Providers ---
   public getAIProviders(): AIProviderConfig[] {
+    const sqliteProviders = DatabaseEngine.getInstance().getAllAIProvidersSql();
+    if (sqliteProviders && sqliteProviders.length > 0) {
+      // Ensure file store is also in sync
+      const store = this.load();
+      store.aiProviders = sqliteProviders;
+      return sqliteProviders;
+    }
     return this.load().aiProviders;
   }
 
@@ -756,39 +792,52 @@ export class StorageService {
     const store = this.load();
     store.aiProviders = providers;
     this.persist(store);
+
+    const db = DatabaseEngine.getInstance();
+    for (const p of providers) {
+      db.saveAIProviderSql(p);
+    }
     return store.aiProviders;
   }
 
   public saveAIProvider(provider: AIProviderConfig): AIProviderConfig {
     const store = this.load();
-    const index = store.aiProviders.findIndex((p) => p.id === provider.id);
+    const finalId = provider.id && provider.id.trim() !== '' ? provider.id : `prov_${Date.now()}`;
     const now = new Date().toISOString();
+    const index = store.aiProviders.findIndex((p) => p.id === finalId);
+
+    let cleanProvider: AIProviderConfig;
 
     if (index >= 0) {
       const existing = store.aiProviders[index];
-      // Keep existing key if not updated
       const updatedKey = provider.apiKey ? provider.apiKey : existing.apiKey;
-      store.aiProviders[index] = {
+      cleanProvider = {
         ...existing,
         ...provider,
+        id: finalId,
         apiKey: updatedKey,
         updatedAt: now,
       };
+      store.aiProviders[index] = cleanProvider;
     } else {
-      const newProvider: AIProviderConfig = {
+      cleanProvider = {
         ...provider,
-        id: provider.id || `prov_${Date.now()}`,
+        id: finalId,
         priority: provider.priority || store.aiProviders.length + 1,
         createdAt: now,
         updatedAt: now,
       };
-      store.aiProviders.push(newProvider);
+      store.aiProviders.push(cleanProvider);
     }
 
     // Sort by priority
     store.aiProviders.sort((a, b) => a.priority - b.priority);
     this.persist(store);
-    return store.aiProviders.find((p) => p.id === provider.id) || provider;
+
+    // Save into persistent SQLite database
+    DatabaseEngine.getInstance().saveAIProviderSql(cleanProvider);
+
+    return cleanProvider;
   }
 
   public deleteAIProvider(id: string): boolean {
@@ -799,8 +848,10 @@ export class StorageService {
       // Re-index priorities 1..N
       store.aiProviders.forEach((p, idx) => {
         p.priority = idx + 1;
+        DatabaseEngine.getInstance().updateAIProviderPrioritySql(p.id, p.priority);
       });
       this.persist(store);
+      DatabaseEngine.getInstance().deleteAIProviderSql(id);
       return true;
     }
     return false;
@@ -817,6 +868,7 @@ export class StorageService {
         item.priority = index + 1;
         reordered.push(item);
         map.delete(id);
+        DatabaseEngine.getInstance().updateAIProviderPrioritySql(id, item.priority);
       }
     });
 
@@ -824,6 +876,7 @@ export class StorageService {
     map.forEach((item) => {
       item.priority = reordered.length + 1;
       reordered.push(item);
+      DatabaseEngine.getInstance().updateAIProviderPrioritySql(item.id, item.priority);
     });
 
     store.aiProviders = reordered;
@@ -838,12 +891,19 @@ export class StorageService {
       provider.enabled = enabled;
       provider.updatedAt = new Date().toISOString();
       this.persist(store);
+      DatabaseEngine.getInstance().toggleAIProviderSql(id, enabled);
       return provider;
     }
     return null;
   }
 
   public getSearchProviders(): SearchProviderConfig[] {
+    const sqliteSearch = DatabaseEngine.getInstance().getAllSearchProvidersSql();
+    if (sqliteSearch && sqliteSearch.length > 0) {
+      const store = this.load();
+      store.searchProviders = sqliteSearch;
+      return sqliteSearch;
+    }
     return this.load().searchProviders;
   }
 
@@ -851,37 +911,50 @@ export class StorageService {
     const store = this.load();
     store.searchProviders = providers;
     this.persist(store);
+
+    const db = DatabaseEngine.getInstance();
+    for (const p of providers) {
+      db.saveSearchProviderSql(p);
+    }
     return store.searchProviders;
   }
 
   public saveSearchProvider(provider: SearchProviderConfig): SearchProviderConfig {
     const store = this.load();
-    const index = store.searchProviders.findIndex((p) => p.id === provider.id);
+    const finalId = provider.id && provider.id.trim() !== '' ? provider.id : `search_${Date.now()}`;
     const now = new Date().toISOString();
+    const index = store.searchProviders.findIndex((p) => p.id === finalId);
+
+    let cleanProvider: SearchProviderConfig;
 
     if (index >= 0) {
       const existing = store.searchProviders[index];
       const updatedKey = provider.apiKey ? provider.apiKey : existing.apiKey;
-      store.searchProviders[index] = {
+      cleanProvider = {
         ...existing,
         ...provider,
+        id: finalId,
         apiKey: updatedKey,
         updatedAt: now,
       };
+      store.searchProviders[index] = cleanProvider;
     } else {
-      const newProvider: SearchProviderConfig = {
+      cleanProvider = {
         ...provider,
-        id: provider.id || `search_${Date.now()}`,
+        id: finalId,
         priority: provider.priority || store.searchProviders.length + 1,
         createdAt: now,
         updatedAt: now,
       };
-      store.searchProviders.push(newProvider);
+      store.searchProviders.push(cleanProvider);
     }
 
     store.searchProviders.sort((a, b) => a.priority - b.priority);
     this.persist(store);
-    return store.searchProviders.find((p) => p.id === provider.id) || provider;
+
+    DatabaseEngine.getInstance().saveSearchProviderSql(cleanProvider);
+
+    return cleanProvider;
   }
 
   public deleteSearchProvider(id: string): boolean {
@@ -891,8 +964,10 @@ export class StorageService {
     if (store.searchProviders.length !== initialLen) {
       store.searchProviders.forEach((p, idx) => {
         p.priority = idx + 1;
+        DatabaseEngine.getInstance().updateSearchProviderPrioritySql(p.id, p.priority);
       });
       this.persist(store);
+      DatabaseEngine.getInstance().deleteSearchProviderSql(id);
       return true;
     }
     return false;
@@ -909,12 +984,14 @@ export class StorageService {
         item.priority = index + 1;
         reordered.push(item);
         map.delete(id);
+        DatabaseEngine.getInstance().updateSearchProviderPrioritySql(id, item.priority);
       }
     });
 
     map.forEach((item) => {
       item.priority = reordered.length + 1;
       reordered.push(item);
+      DatabaseEngine.getInstance().updateSearchProviderPrioritySql(item.id, item.priority);
     });
 
     store.searchProviders = reordered;
@@ -929,6 +1006,7 @@ export class StorageService {
       provider.enabled = enabled;
       provider.updatedAt = new Date().toISOString();
       this.persist(store);
+      DatabaseEngine.getInstance().toggleSearchProviderSql(id, enabled);
       return provider;
     }
     return null;
