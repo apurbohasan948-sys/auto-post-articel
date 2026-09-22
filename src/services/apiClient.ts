@@ -89,10 +89,26 @@ export async function safeApiCall<T>(
     }
 
     if (!res.ok) {
-      const errMsg = parsed?.error || parsed?.message || `HTTP request failed with status ${res.status}`;
+      let errMsg = `HTTP ${res.status}`;
+      if (typeof parsed?.error === 'string') {
+        errMsg = parsed.error;
+      } else if (parsed?.error?.message) {
+        errMsg = parsed.error.message;
+      } else if (parsed?.message) {
+        errMsg = parsed.message;
+      } else {
+        errMsg = `HTTP request failed with status ${res.status}`;
+      }
+
+      // If parsed contains valid result payload (such as status, error, ok, provider), retain parsed as data
+      const dataPayload = (parsed?.data ??
+        (parsed && typeof parsed === 'object' && ('status' in parsed || 'error' in parsed || 'ok' in parsed || 'status_code' in parsed)
+          ? parsed
+          : fallback)) as T;
+
       return {
         success: false,
-        data: (parsed?.data ?? fallback) as T,
+        data: dataPayload,
         statusCode: res.status,
         error: errMsg,
       };
@@ -516,15 +532,29 @@ export const apiClient = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
-    if (res.data) return res.data;
+    if (res.data) {
+      const data = { ...res.data };
+      if (typeof data.error === 'object' && data.error !== null) {
+        data.errorDetails = data.error as any;
+        data.error = (data.error as any).message || JSON.stringify(data.error);
+      }
+      return data;
+    }
     return {
+      ok: false,
       success: false,
       status: 'FAILED',
+      status_code: res.statusCode || 500,
       latencyMs: 0,
-      providerId: params.providerId || 'unknown',
+      providerId: params.providerId || params.provider?.id || 'unknown',
       provider: params.provider?.name || 'Unknown',
       model: params.provider?.modelName || params.provider?.defaultModel || '',
-      error: res.error || 'Failed to execute test probe',
+      error: res.error || `HTTP request failed with status ${res.statusCode || 500}`,
+      errorDetails: {
+        type: 'network_error',
+        message: res.error || `HTTP request failed with status ${res.statusCode || 500}`,
+        providerStatus: res.statusCode || 500,
+      },
       timestamp: new Date().toISOString(),
     };
   },
@@ -539,15 +569,24 @@ export const apiClient = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
-    if (res.data) return res.data;
+    if (res.data) {
+      const data = { ...res.data };
+      if (typeof data.error === 'object' && data.error !== null) {
+        data.errorDetails = data.error as any;
+        data.error = (data.error as any).message || JSON.stringify(data.error);
+      }
+      return data;
+    }
     return {
+      ok: false,
       success: false,
       status: 'FAILED',
+      status_code: res.statusCode || 500,
       latencyMs: 0,
-      providerId: params.providerId || 'unknown',
+      providerId: params.providerId || params.provider?.id || 'unknown',
       provider: params.provider?.name || 'Unknown',
       model: params.provider?.modelName || params.provider?.defaultModel || '',
-      error: res.error || 'Failed to execute playground query',
+      error: res.error || `HTTP request failed with status ${res.statusCode || 500}`,
       timestamp: new Date().toISOString(),
     };
   },

@@ -175,7 +175,11 @@ export const ProviderModal: React.FC<ProviderModalProps> = ({
       const res = await apiClient.testAIProvider({ provider: payload });
       setTestResult(res);
       if (!res.success) {
-        setErrorMsg(res.error || 'Test failed without explicit error details');
+        const errText =
+          typeof res.error === 'string'
+            ? res.error
+            : (res.error as any)?.message || 'Test failed without explicit error details';
+        setErrorMsg(errText);
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -562,7 +566,11 @@ export const ProviderModal: React.FC<ProviderModalProps> = ({
                 </div>
               )}
               {testResult.error && (
-                <div className="text-[11px] text-rose-300 font-mono">{testResult.error}</div>
+                <div className="text-[11px] text-rose-300 font-mono">
+                  {typeof testResult.error === 'string'
+                    ? testResult.error
+                    : (testResult.error as any)?.message || JSON.stringify(testResult.error)}
+                </div>
               )}
             </div>
           )}

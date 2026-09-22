@@ -15,15 +15,33 @@
  * - https://openrouter.ai/api/v1/ -> https://openrouter.ai/api/v1/chat/completions
  * - Avoids duplicate /v1/v1 or duplicate /chat/completions
  */
-export function normalizeChatCompletionsUrl(rawBaseUrl?: string): string {
+/**
+ * Normalizes OpenAI-compatible base URL to chat completions endpoint.
+ * Handles:
+ * - https://example.com/v1 -> https://example.com/v1/chat/completions
+ * - https://example.com/v1/ -> https://example.com/v1/chat/completions
+ * - https://example.com -> https://example.com/v1/chat/completions
+ * - https://example.com/v1/chat/completions -> https://example.com/v1/chat/completions
+ * - Avoids duplicate /v1/v1, /chat/completions/chat/completions, or //chat/completions
+ */
+export function normalizeOpenAICompatibleUrl(rawBaseUrl?: string): string {
   let clean = (rawBaseUrl || '').trim();
-
-  // Strip trailing slashes
-  clean = clean.replace(/\/+$/, '');
 
   if (!clean) {
     return 'https://api.openai.com/v1/chat/completions';
   }
+
+  // Remove duplicate slashes (except in protocol ://)
+  clean = clean.replace(/([^:]\/)\/+/g, '$1');
+
+  // Strip trailing slashes
+  clean = clean.replace(/\/+$/, '');
+
+  // Eliminate duplicate /v1 repeated sequences (e.g. /v1/v1 -> /v1)
+  clean = clean.replace(/(\/v1)+/g, '/v1');
+
+  // Strip duplicate repeated /chat/completions sequences
+  clean = clean.replace(/(\/chat\/completions)+/g, '/chat/completions');
 
   // If already ends with /chat/completions, return as is
   if (clean.endsWith('/chat/completions')) {
@@ -40,25 +58,46 @@ export function normalizeChatCompletionsUrl(rawBaseUrl?: string): string {
     return `${clean}/chat/completions`;
   }
 
-  // If it has /v1/ in the middle, check what follows
+  // If ends with /v1/chat
+  if (clean.endsWith('/v1/chat')) {
+    return `${clean}/completions`;
+  }
+
+  // If it contains /v1/chat/completions
+  if (clean.includes('/v1/chat/completions')) {
+    const idx = clean.indexOf('/v1/chat/completions');
+    return clean.substring(0, idx + '/v1/chat/completions'.length);
+  }
+
+  // If it already contains /chat/completions somewhere in the path
+  if (clean.includes('/chat/completions')) {
+    const idx = clean.indexOf('/chat/completions');
+    return clean.substring(0, idx + '/chat/completions'.length);
+  }
+
+  // If it has /v1/ in the path
   if (clean.includes('/v1/')) {
-    const afterV1 = clean.substring(clean.lastIndexOf('/v1/') + 4);
+    const v1Index = clean.lastIndexOf('/v1/');
+    const afterV1 = clean.substring(v1Index + 4);
     if (afterV1 === 'chat/completions') {
       return clean;
     }
     if (afterV1 === 'chat') {
       return `${clean}/completions`;
     }
-    return `${clean}/chat/completions`;
+    return `${clean.substring(0, v1Index + 3)}/chat/completions`;
   }
 
-  // If it's a known domain or standard base without /v1 (e.g., https://api.openai.com or https://openrouter.ai/api)
+  // If it's a domain or standard base without /v1 and without /chat
   if (!clean.includes('/v1') && !clean.includes('/chat')) {
     return `${clean}/v1/chat/completions`;
   }
 
   return `${clean}/chat/completions`;
 }
+
+// Retain alias for backwards compatibility
+export const normalizeChatCompletionsUrl = normalizeOpenAICompatibleUrl;
 
 /**
  * Normalizes Tavily search endpoint.

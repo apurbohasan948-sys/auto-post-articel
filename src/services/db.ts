@@ -10,11 +10,17 @@ import path from 'path';
 import { createRequire } from 'module';
 import { AIProviderConfig, SearchProviderConfig } from '../types/agent.ts';
 
-const require = createRequire(import.meta.url);
-
 let DatabaseSyncClass: any = null;
 try {
-  const sqlite = require('node:sqlite');
+  const dynamicRequire =
+    typeof require === 'function'
+      ? require
+      : createRequire(
+          typeof import.meta !== 'undefined' && import.meta?.url
+            ? import.meta.url
+            : path.join(process.cwd(), 'dummy.js')
+        );
+  const sqlite = dynamicRequire('node:sqlite');
   DatabaseSyncClass = sqlite.DatabaseSync;
 } catch {
   // SQLite native module not available; fallback will use durable file store

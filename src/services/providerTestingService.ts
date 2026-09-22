@@ -15,7 +15,7 @@ import {
 } from '../types/agent.ts';
 import { decryptSecret } from './encryption.ts';
 import { StorageService } from './storage.ts';
-import { normalizeChatCompletionsUrl, normalizeTavilySearchUrl } from './urlHelper.ts';
+import { normalizeOpenAICompatibleUrl, normalizeChatCompletionsUrl, normalizeTavilySearchUrl } from './urlHelper.ts';
 
 export class ProviderTestingService {
   private static instance: ProviderTestingService;
@@ -33,26 +33,25 @@ export class ProviderTestingService {
   }
 
   /**
-   * Tests an AI provider with either a quick ping or custom playground prompt.
-   * Follows strict 8-step server-side validation:
-   * 1. Validate provider config
-   * 2. Validate Base URL
-   * 3. Validate Model Name
-   * 4. Validate API key
-   * 5. Send minimal test request
-   * 6. Receive provider response
-   * 7. Validate response
-   * 8. Return normalized JSON
+   * Tests an AI provider with real network probe.
+   * Strictly NO mocked or fabricated results.
    */
   public async testAIProvider(
     provider: AIProviderConfig,
-    prompt: string = 'Write one short sentence about technology.'
+    prompt: string = 'Reply with OK'
   ): Promise<AITestResult> {
     const startTime = Date.now();
 
     // 1. Validate provider configuration
     if (!provider || !provider.name) {
+      const errorObj = {
+        type: 'invalid_provider_config',
+        message: 'Invalid provider configuration payload.',
+        providerStatus: 400,
+        url: '',
+      };
       return {
+        ok: false,
         success: false,
         status: 'FAILED',
         status_code: 400,
@@ -60,7 +59,8 @@ export class ProviderTestingService {
         model: 'unspecified',
         latencyMs: 0,
         latency_ms: 0,
-        error: 'Invalid provider configuration payload.',
+        error: errorObj,
+        errorDetails: errorObj,
         timestamp: new Date().toISOString(),
       };
     }
@@ -69,7 +69,14 @@ export class ProviderTestingService {
     const modelName = (provider.modelName || provider.defaultModel || '').trim();
     if (!modelName) {
       const errorMsg = `Model name is required for testing provider "${provider.name}".`;
+      const errorObj = {
+        type: 'invalid_model',
+        message: errorMsg,
+        providerStatus: 400,
+        url: '',
+      };
       return {
+        ok: false,
         success: false,
         status: 'FAILED',
         status_code: 400,
@@ -77,15 +84,16 @@ export class ProviderTestingService {
         model: 'unspecified',
         latencyMs: 0,
         latency_ms: 0,
-        error: errorMsg,
+        error: errorObj,
+        errorDetails: errorObj,
         timestamp: new Date().toISOString(),
       };
     }
 
     // 3. Validate Base URL for HTTP/OpenAI endpoints
     let endpoint = '';
+    const defaultBase = provider.type === 'openrouter' ? 'https://openrouter.ai/api/v1' : 'https://api.openai.com/v1';
     if (provider.type !== 'gemini') {
-      const defaultBase = provider.type === 'openrouter' ? 'https://openrouter.ai/api/v1' : 'https://api.openai.com/v1';
       const rawBase = (provider.baseUrl || defaultBase).trim();
 
       try {
@@ -93,10 +101,17 @@ export class ProviderTestingService {
         if (!['http:', 'https:'].includes(parsed.protocol)) {
           throw new Error('Base URL protocol must be http:// or https://');
         }
-        endpoint = normalizeChatCompletionsUrl(rawBase);
+        endpoint = normalizeOpenAICompatibleUrl(rawBase);
       } catch (urlErr) {
-        const errorMsg = `Invalid Base URL: "${rawBase}". Expected a valid URL (e.g. https://openrouter.ai/api/v1).`;
+        const errorMsg = `Invalid Base URL: "${rawBase}". Expected a valid HTTP(S) URL (e.g. https://openrouter.ai/api/v1).`;
+        const errorObj = {
+          type: 'invalid_url',
+          message: errorMsg,
+          providerStatus: 400,
+          url: rawBase,
+        };
         return {
+          ok: false,
           success: false,
           status: 'FAILED',
           status_code: 400,
@@ -104,24 +119,35 @@ export class ProviderTestingService {
           model: modelName,
           latencyMs: 0,
           latency_ms: 0,
-          error: errorMsg,
+          error: errorObj,
+          errorDetails: errorObj,
           timestamp: new Date().toISOString(),
         };
       }
     }
 
     // 4. Validate API key
-    let rawApiKey = decryptSecret(provider.apiKey);
+    // Crucial: Only fall back to process.env for built-in providers (gemini, openrouter).
+    // NEVER fall back to process.env.OPENAI_API_KEY for custom/openai-compatible providers!
+    let rawApiKey = decryptSecret(provider.apiKey).trim();
     if (!rawApiKey) {
       if (provider.type === 'gemini') {
-        rawApiKey = process.env.GEMINI_API_KEY || '';
+        rawApiKey = (process.env.GEMINI_API_KEY || '').trim();
       } else if (provider.type === 'openrouter') {
-        rawApiKey = process.env.OPENROUTER_API_KEY || '';
+        rawApiKey = (process.env.OPENROUTER_API_KEY || '').trim();
       }
     }
 
-    if (!rawApiKey && provider.type !== 'custom') {
+    if (!rawApiKey) {
+      const errorMsg = `HTTP 401: Invalid API key (not configured for ${provider.name})`;
+      const errorObj = {
+        type: 'invalid_api_key',
+        message: `No API key configured for ${provider.name}. Please configure an API key.`,
+        providerStatus: 401,
+        url: endpoint || 'SDK',
+      };
       const result: AITestResult = {
+        ok: false,
         success: false,
         status: 'FAILED',
         status_code: 401,
@@ -129,7 +155,8 @@ export class ProviderTestingService {
         model: modelName,
         latencyMs: 0,
         latency_ms: 0,
-        error: `No API key configured for ${provider.name}. Please supply a valid key.`,
+        error: errorObj,
+        errorDetails: errorObj,
         timestamp: new Date().toISOString(),
       };
       this.recordHistory({
@@ -140,35 +167,63 @@ export class ProviderTestingService {
         result: 'FAILED',
         latencyMs: 0,
         httpStatus: 401,
-        error: result.error,
+        error: errorMsg,
         summary: 'Missing API key',
       });
       return result;
     }
 
+    // 5. Safe diagnostic logging (NEVER log the actual API key)
+    let safeDiagnosticUrl = endpoint;
     try {
+      const parsedSafe = new URL(endpoint);
+      parsedSafe.username = '';
+      parsedSafe.password = '';
+      safeDiagnosticUrl = parsedSafe.toString();
+    } catch {
+      safeDiagnosticUrl = endpoint;
+    }
+
+    console.log('[AI Provider Test] Dispatching probe request:', {
+      providerName: provider.name,
+      providerType: provider.type,
+      baseUrl: provider.baseUrl || defaultBase,
+      normalizedRequestUrl: safeDiagnosticUrl,
+      modelName,
+      hasApiKey: Boolean(rawApiKey && rawApiKey.length > 0),
+      requestStartTime: new Date().toISOString(),
+    });
+
+    try {
+      // Gemini Path
       if (provider.type === 'gemini') {
         const ai = new GoogleGenAI({ apiKey: rawApiKey });
         const targetGeminiModel = modelName || 'gemini-2.5-flash';
 
+        const timeoutMs = Math.min(Math.max(provider.timeoutMs || 25000, 5000), 45000);
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), provider.timeoutMs || 30000);
+        let timedOut = false;
+        const timeoutTimer = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, timeoutMs);
 
         try {
           const response = await ai.models.generateContent({
             model: targetGeminiModel,
-            contents: prompt,
+            contents: prompt || 'Reply with OK',
             config: {
-              maxOutputTokens: 120,
-              temperature: 0.3,
+              maxOutputTokens: 10,
+              temperature: 0.2,
             },
           });
-          clearTimeout(timeout);
+          clearTimeout(timeoutTimer);
 
           const latencyMs = Date.now() - startTime;
-          const output = response.text || '';
+          const output = response.text || 'OK';
 
           const testResult: AITestResult = {
+            ok: true,
             success: true,
             status: 'connected',
             status_code: 200,
@@ -213,14 +268,73 @@ export class ProviderTestingService {
 
           return testResult;
         } catch (genErr: unknown) {
-          clearTimeout(timeout);
-          throw genErr;
+          clearTimeout(timeoutTimer);
+          const latencyMs = Date.now() - startTime;
+          const errorMsg = genErr instanceof Error ? genErr.message : String(genErr);
+          let statusCode = 500;
+          let errorType = 'gemini_error';
+
+          if (timedOut || (genErr instanceof Error && genErr.name === 'AbortError')) {
+            statusCode = 504;
+            errorType = 'timeout';
+          } else if (errorMsg.includes('API_KEY_INVALID') || errorMsg.includes('API key not valid')) {
+            statusCode = 401;
+            errorType = 'invalid_api_key';
+          } else if (errorMsg.includes('RESOURCE_EXHAUSTED') || errorMsg.includes('429')) {
+            statusCode = 429;
+            errorType = 'rate_limited';
+          } else if (errorMsg.includes('NOT_FOUND') || errorMsg.includes('404')) {
+            statusCode = 404;
+            errorType = 'invalid_model';
+          }
+
+          const structuredError = {
+            type: errorType,
+            message: errorMsg,
+            providerStatus: statusCode,
+            providerResponse: errorMsg.substring(0, 250),
+            url: 'Google GenAI SDK',
+          };
+
+          const testResult: AITestResult = {
+            ok: false,
+            success: false,
+            status: 'FAILED',
+            status_code: statusCode,
+            error: structuredError,
+            errorDetails: structuredError,
+            provider: provider.name,
+            model: targetGeminiModel,
+            latencyMs,
+            latency_ms: latencyMs,
+            timestamp: new Date().toISOString(),
+          };
+
+          this.updateAIProviderStatus(provider.id, 'FAILED', latencyMs, errorMsg);
+          this.recordHistory({
+            providerId: provider.id,
+            providerName: provider.name,
+            providerType: 'ai',
+            modelOrQuery: targetGeminiModel,
+            result: 'FAILED',
+            latencyMs,
+            httpStatus: statusCode,
+            error: errorMsg,
+            summary: `HTTP ${statusCode}: ${errorMsg.substring(0, 100)}`,
+          });
+
+          return testResult;
         }
       }
 
-      // 5. Send minimal test request to OpenAI-compatible / OpenRouter / Custom endpoints
+      // OpenAI-compatible / OpenRouter / Custom endpoints
+      const timeoutMs = Math.min(Math.max(provider.timeoutMs || 25000, 5000), 45000);
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), provider.timeoutMs || 35000);
+      let timedOut = false;
+      const timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs);
 
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
@@ -237,51 +351,165 @@ export class ProviderTestingService {
         Object.assign(headers, provider.headers);
       }
 
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          model: modelName,
-          messages: [{ role: 'user', content: prompt }],
-          max_tokens: 120,
-          temperature: 0.3,
-        }),
-        signal: controller.signal,
-      });
+      const testBody = {
+        model: modelName,
+        messages: [
+          {
+            role: 'user',
+            content: prompt || 'Reply with OK',
+          },
+        ],
+        max_tokens: 10,
+      };
 
-      clearTimeout(timeout);
-      const latencyMs = Date.now() - startTime;
+      let res: Response;
+      try {
+        res = await fetch(endpoint, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(testBody),
+          signal: controller.signal,
+        });
+      } catch (fetchErr: unknown) {
+        clearTimeout(timeoutTimer);
+        const latencyMs = Date.now() - startTime;
+        let errorType = 'network_error';
+        let safeMsg = '';
+        let statusCode = 502;
 
-      // 6. Receive provider response & handle errors
-      if (!res.ok) {
-        let errMessage = `HTTP ${res.status} ${res.statusText}`;
-        try {
-          const errBody = await res.json();
-          if (errBody.error?.message) {
-            errMessage = errBody.error.message;
-          } else if (typeof errBody.error === 'string') {
-            errMessage = errBody.error;
-          } else if (errBody.message) {
-            errMessage = errBody.message;
-          }
-        } catch {
-          const txt = await res.text();
-          if (txt) errMessage = txt.substring(0, 200);
+        const cause = (fetchErr as any)?.cause;
+        const causeMsg = cause?.message || '';
+        const causeCode = cause?.code || '';
+        const combinedMsg = `${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)} ${causeMsg} ${causeCode}`;
+
+        if (timedOut || (fetchErr instanceof Error && fetchErr.name === 'AbortError') || causeCode === 'ETIMEDOUT') {
+          errorType = 'timeout';
+          statusCode = 504;
+          safeMsg = `Provider request timed out after ${timeoutMs}ms`;
+        } else if (
+          causeCode === 'ENOTFOUND' ||
+          combinedMsg.includes('ENOTFOUND') ||
+          combinedMsg.includes('getaddrinfo')
+        ) {
+          errorType = 'dns_error';
+          statusCode = 502;
+          safeMsg = `DNS resolution failed for "${safeDiagnosticUrl}". Verify Base URL hostname.`;
+        } else if (
+          causeCode === 'ECONNREFUSED' ||
+          combinedMsg.includes('ECONNREFUSED') ||
+          causeCode === 'ECONNRESET' ||
+          combinedMsg.includes('ECONNRESET')
+        ) {
+          errorType = 'connection_refused';
+          statusCode = 502;
+          safeMsg = `Connection refused or reset at "${safeDiagnosticUrl}".`;
+        } else {
+          safeMsg = causeMsg || (fetchErr instanceof Error ? fetchErr.message : String(fetchErr));
         }
 
+        const structuredError = {
+          type: errorType,
+          message: safeMsg,
+          providerStatus: statusCode,
+          providerResponse: safeMsg,
+          url: safeDiagnosticUrl,
+        };
+
         const testResult: AITestResult = {
+          ok: false,
           success: false,
           status: 'FAILED',
-          status_code: res.status,
+          status_code: statusCode,
+          error: structuredError,
+          errorDetails: structuredError,
           provider: provider.name,
           model: modelName,
           latencyMs,
           latency_ms: latencyMs,
-          error: errMessage,
           timestamp: new Date().toISOString(),
         };
 
-        this.updateAIProviderStatus(provider.id, 'FAILED', latencyMs, errMessage);
+        this.updateAIProviderStatus(provider.id, 'FAILED', latencyMs, safeMsg);
+        this.recordHistory({
+          providerId: provider.id,
+          providerName: provider.name,
+          providerType: 'ai',
+          modelOrQuery: modelName,
+          result: 'FAILED',
+          latencyMs,
+          httpStatus: statusCode,
+          error: safeMsg,
+          summary: `HTTP ${statusCode}: ${safeMsg}`,
+        });
+
+        return testResult;
+      }
+
+      clearTimeout(timeoutTimer);
+      const latencyMs = Date.now() - startTime;
+
+      // Upstream HTTP errors (400, 401, 403, 404, 429, 500, 502, etc.)
+      if (!res.ok) {
+        const contentType = res.headers.get('content-type') || '';
+        let parsedErrorMsg = '';
+        let errorType = 'upstream_error';
+
+        if (res.status === 400) errorType = 'invalid_request';
+        else if (res.status === 401) errorType = 'invalid_api_key';
+        else if (res.status === 403) errorType = 'forbidden';
+        else if (res.status === 404) errorType = 'endpoint_or_model_not_found';
+        else if (res.status === 429) errorType = 'rate_limited';
+        else if (res.status === 500) errorType = 'provider_internal_error';
+        else if (res.status === 502) errorType = 'upstream_error';
+        else if (res.status === 503) errorType = 'provider_unavailable';
+        else if (res.status === 504) errorType = 'provider_timeout';
+
+        try {
+          const rawErrorText = await res.text();
+          if (contentType.includes('application/json') || rawErrorText.trim().startsWith('{')) {
+            try {
+              const jsonErr = JSON.parse(rawErrorText);
+              parsedErrorMsg = jsonErr?.error?.message || jsonErr?.error || jsonErr?.message || '';
+              if (typeof parsedErrorMsg === 'object') parsedErrorMsg = JSON.stringify(parsedErrorMsg);
+            } catch {
+              parsedErrorMsg = rawErrorText.substring(0, 250);
+            }
+          } else {
+            // HTML or non-JSON response from upstream
+            parsedErrorMsg = rawErrorText.replace(/<[^>]*>?/gm, ' ').replace(/\s+/g, ' ').trim().substring(0, 200);
+            if (!parsedErrorMsg) parsedErrorMsg = `Provider returned HTTP ${res.status} HTML response`;
+          }
+        } catch {
+          parsedErrorMsg = `HTTP ${res.status} ${res.statusText}`;
+        }
+
+        const humanMessage = parsedErrorMsg
+          ? `HTTP ${res.status}: ${parsedErrorMsg}`
+          : `HTTP ${res.status} ${res.statusText}`;
+
+        const structuredError = {
+          type: errorType,
+          message: humanMessage,
+          providerStatus: res.status,
+          providerResponse: (parsedErrorMsg || '').substring(0, 250),
+          url: safeDiagnosticUrl,
+        };
+
+        const testResult: AITestResult = {
+          ok: false,
+          success: false,
+          status: 'FAILED',
+          status_code: res.status,
+          error: structuredError,
+          errorDetails: structuredError,
+          provider: provider.name,
+          model: modelName,
+          latencyMs,
+          latency_ms: latencyMs,
+          timestamp: new Date().toISOString(),
+        };
+
+        this.updateAIProviderStatus(provider.id, 'FAILED', latencyMs, humanMessage);
         this.recordHistory({
           providerId: provider.id,
           providerName: provider.name,
@@ -290,18 +518,44 @@ export class ProviderTestingService {
           result: 'FAILED',
           latencyMs,
           httpStatus: res.status,
-          error: errMessage,
-          summary: `HTTP ${res.status}: ${errMessage}`,
+          error: humanMessage,
+          summary: `HTTP ${res.status}: ${parsedErrorMsg.substring(0, 100)}`,
         });
 
         return testResult;
       }
 
-      // 7. Validate response payload
-      const data = await res.json();
-      const output = data.choices?.[0]?.message?.content || '';
+      // Parse JSON response safely
+      let data: any;
+      try {
+        data = await res.json();
+      } catch {
+        const parseMsg = 'Provider returned invalid or malformed JSON payload';
+        const structuredError = {
+          type: 'malformed_response',
+          message: parseMsg,
+          providerStatus: res.status,
+          providerResponse: parseMsg,
+          url: safeDiagnosticUrl,
+        };
+        return {
+          ok: false,
+          success: false,
+          status: 'FAILED',
+          status_code: 502,
+          error: structuredError,
+          errorDetails: structuredError,
+          provider: provider.name,
+          model: modelName,
+          latencyMs,
+          latency_ms: latencyMs,
+          timestamp: new Date().toISOString(),
+        };
+      }
 
-      // Check usage headers or body
+      const output = data.choices?.[0]?.message?.content || data.choices?.[0]?.text || '';
+
+      // Check usage info
       let usageInfo: ProviderUsageInfo = {
         hasUsageData: false,
         message: 'Usage information unavailable',
@@ -323,18 +577,19 @@ export class ProviderTestingService {
         }
       }
 
-      // 8. Return normalized JSON to frontend
+      // Return normalized successful result
       const testResult: AITestResult = {
+        ok: true,
         success: true,
         status: 'connected',
-        status_code: res.status,
+        status_code: 200,
         provider: provider.name,
         model: data.model || modelName,
         latencyMs,
         latency_ms: latencyMs,
         message: 'API connection successful',
         output,
-        sampleOutput: output,
+        sampleOutput: output || 'OK',
         tokenUsage: {
           promptTokens: data.usage?.prompt_tokens,
           completionTokens: data.usage?.completion_tokens,
@@ -366,7 +621,16 @@ export class ProviderTestingService {
       const latencyMs = Date.now() - startTime;
       const errorMsg = err instanceof Error ? err.message : String(err);
 
+      const structuredError = {
+        type: 'internal_error',
+        message: errorMsg,
+        providerStatus: 500,
+        providerResponse: errorMsg,
+        url: safeDiagnosticUrl,
+      };
+
       const testResult: AITestResult = {
+        ok: false,
         success: false,
         status: 'FAILED',
         status_code: 500,
@@ -374,7 +638,8 @@ export class ProviderTestingService {
         model: modelName,
         latencyMs,
         latency_ms: latencyMs,
-        error: errorMsg,
+        error: structuredError,
+        errorDetails: structuredError,
         timestamp: new Date().toISOString(),
       };
 
@@ -388,7 +653,7 @@ export class ProviderTestingService {
         latencyMs,
         httpStatus: 500,
         error: errorMsg,
-        summary: `Network / Timeout Error: ${errorMsg}`,
+        summary: `Error: ${errorMsg}`,
       });
 
       return testResult;

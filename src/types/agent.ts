@@ -303,6 +303,7 @@ export interface ApiTestHistoryItem {
 }
 
 export interface AITestResult {
+  ok?: boolean;
   success: boolean;
   status: number | string;
   status_code?: number;
@@ -324,7 +325,24 @@ export interface AITestResult {
     totalTokens?: number;
   };
   usageInfo?: ProviderUsageInfo;
-  error?: string;
+  error?:
+    | string
+    | {
+        type?: string;
+        message?: string;
+        providerStatus?: number;
+        providerResponse?: string;
+        url?: string;
+        [key: string]: any;
+      };
+  errorDetails?: {
+    type?: string;
+    message?: string;
+    providerStatus?: number;
+    providerResponse?: string;
+    url?: string;
+    [key: string]: any;
+  };
   timestamp: string;
   providerId?: string;
 }

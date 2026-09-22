@@ -354,19 +354,33 @@ app.post('/api/providers/ai/toggle', (req: Request, res: Response) => {
 const handleAIProviderTest = async (req: Request, res: Response) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const { providerId, provider } = req.body || {};
+    const { providerId, provider, prompt } = req.body || {};
     let targetProvider = provider;
 
     if (providerId) {
-      targetProvider = storage.getAIProviders().find((p) => p.id === providerId);
+      const stored = storage.getAIProviders().find((p) => p.id === providerId);
+      if (stored) {
+        targetProvider = { ...stored, ...(provider || {}) };
+        if (targetProvider.apiKey && targetProvider.apiKey.includes('••••') && stored.apiKey) {
+          targetProvider.apiKey = stored.apiKey;
+        }
+      }
     }
 
     if (!targetProvider) {
+      const errorObj = {
+        type: 'provider_not_found',
+        message: 'Provider not found',
+        providerStatus: 404,
+        url: '',
+      };
       return res.status(404).json({
+        ok: false,
         success: false,
         status: 'FAILED',
         status_code: 404,
-        error: 'Provider not found',
+        error: errorObj,
+        errorDetails: errorObj,
         latency_ms: 0,
         latencyMs: 0,
         timestamp: new Date().toISOString(),
@@ -376,18 +390,36 @@ const handleAIProviderTest = async (req: Request, res: Response) => {
     // If key is masked in incoming payload, resolve from storage
     if (targetProvider.apiKey && targetProvider.apiKey.includes('••••')) {
       const stored = storage.getAIProviders().find((p) => p.id === targetProvider.id);
-      if (stored) targetProvider.apiKey = stored.apiKey;
+      if (stored && stored.apiKey && !stored.apiKey.includes('••••')) {
+        targetProvider.apiKey = stored.apiKey;
+      }
     }
 
-    const testResult = await testingService.testAIProvider(targetProvider);
-    res.json(testResult);
+    const testResult = await testingService.testAIProvider(targetProvider, prompt || 'Reply with OK');
+    const httpStatus =
+      typeof testResult.status_code === 'number'
+        ? testResult.status_code
+        : typeof testResult.status === 'number'
+        ? testResult.status
+        : testResult.success
+        ? 200
+        : 400;
+    res.status(httpStatus).json(testResult);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
+    const errorObj = {
+      type: 'internal_error',
+      message: msg,
+      providerStatus: 500,
+      url: '',
+    };
     res.status(500).json({
+      ok: false,
       success: false,
       status: 'FAILED',
       status_code: 500,
-      error: msg,
+      error: errorObj,
+      errorDetails: errorObj,
       latency_ms: 0,
       latencyMs: 0,
       timestamp: new Date().toISOString(),

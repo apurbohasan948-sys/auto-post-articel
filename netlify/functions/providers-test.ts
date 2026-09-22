@@ -59,18 +59,32 @@ export const handler = async (event: any) => {
     let targetProvider = provider;
 
     if (providerId) {
-      targetProvider = storage.getAIProviders().find((p) => p.id === providerId);
+      const stored = storage.getAIProviders().find((p) => p.id === providerId);
+      if (stored) {
+        targetProvider = { ...stored, ...(provider || {}) };
+        if (targetProvider.apiKey && targetProvider.apiKey.includes('••••') && stored.apiKey) {
+          targetProvider.apiKey = stored.apiKey;
+        }
+      }
     }
 
     if (!targetProvider) {
+      const errorObj = {
+        type: 'provider_not_found',
+        message: 'AI Provider configuration or ID not found.',
+        providerStatus: 404,
+        url: '',
+      };
       return {
         statusCode: 404,
         headers,
         body: JSON.stringify({
+          ok: false,
           success: false,
           status: 'FAILED',
           status_code: 404,
-          error: 'AI Provider configuration or ID not found.',
+          error: errorObj,
+          errorDetails: errorObj,
           latency_ms: 0,
           latencyMs: 0,
           timestamp: new Date().toISOString(),
@@ -81,15 +95,24 @@ export const handler = async (event: any) => {
     // If key is masked in incoming payload, resolve from storage
     if (targetProvider.apiKey && targetProvider.apiKey.includes('••••')) {
       const stored = storage.getAIProviders().find((p) => p.id === targetProvider.id);
-      if (stored) targetProvider.apiKey = stored.apiKey;
+      if (stored && stored.apiKey && !stored.apiKey.includes('••••')) {
+        targetProvider.apiKey = stored.apiKey;
+      }
     }
 
     const testResult = await testingService.testAIProvider(
       targetProvider,
-      prompt || 'Write one short sentence about technology.'
+      prompt || 'Reply with OK'
     );
 
-    const httpStatus = typeof testResult.status === 'number' ? testResult.status : testResult.success ? 200 : 400;
+    const httpStatus =
+      typeof testResult.status_code === 'number'
+        ? testResult.status_code
+        : typeof testResult.status === 'number'
+        ? testResult.status
+        : testResult.success
+        ? 200
+        : 400;
 
     return {
       statusCode: httpStatus,
@@ -98,14 +121,22 @@ export const handler = async (event: any) => {
     };
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : String(err);
+    const errorObj = {
+      type: 'internal_error',
+      message: `Server-side test error: ${errorMsg}`,
+      providerStatus: 500,
+      url: '',
+    };
     return {
       statusCode: 500,
       headers,
       body: JSON.stringify({
+        ok: false,
         success: false,
         status: 'FAILED',
         status_code: 500,
-        error: `Server-side test error: ${errorMsg}`,
+        error: errorObj,
+        errorDetails: errorObj,
         latency_ms: 0,
         latencyMs: 0,
         timestamp: new Date().toISOString(),

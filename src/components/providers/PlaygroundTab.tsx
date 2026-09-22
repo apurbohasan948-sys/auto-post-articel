@@ -260,7 +260,11 @@ export const PlaygroundTab: React.FC<PlaygroundTabProps> = ({
                         <AlertCircle className="w-4 h-4" />
                         <span>Execution Failed ({aiResult.status})</span>
                       </div>
-                      <p className="text-slate-300">{aiResult.error}</p>
+                      <p className="text-slate-300">
+                        {typeof aiResult.error === 'string'
+                          ? aiResult.error
+                          : (aiResult.error as any)?.message || JSON.stringify(aiResult.error)}
+                      </p>
                     </div>
                   )
                 ) : (

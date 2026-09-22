@@ -179,12 +179,18 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({
   const handleTestAi = async (p: AIProviderConfig) => {
     setAiTestStates((prev) => ({ ...prev, [p.id]: { loading: true } }));
     try {
-      const res = await apiClient.testAIProvider({ providerId: p.id });
+      const res = await apiClient.testAIProvider({ providerId: p.id, provider: p });
       setAiTestStates((prev) => ({ ...prev, [p.id]: { loading: false, result: res } }));
       if (res.success) {
-        showToast(`Test passed for ${p.name} (${res.latencyMs}ms)`);
+        showToast(`Test passed for ${p.name} (${res.latencyMs || res.latency_ms || 0}ms)`);
       } else {
-        showToast(`Test failed for ${p.name}: ${res.error || 'Connection error'}`, 'error');
+        const errText =
+          typeof res.error === 'string'
+            ? res.error
+            : (res.error as any)?.message ||
+              (res.errorDetails as any)?.message ||
+              'Connection error';
+        showToast(`Test failed for ${p.name}: ${errText}`, 'error');
       }
       await refreshAllData();
     } catch (err: unknown) {
@@ -193,7 +199,15 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({
         ...prev,
         [p.id]: {
           loading: false,
-          result: { success: false, providerId: p.id, status: 'FAILED', latencyMs: 0, error: msg, timestamp: new Date().toISOString() },
+          result: {
+            success: false,
+            providerId: p.id,
+            status: 'FAILED',
+            status_code: 500,
+            latencyMs: 0,
+            error: msg,
+            timestamp: new Date().toISOString(),
+          },
         },
       }));
       showToast(msg, 'error');
@@ -587,15 +601,32 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({
 
                     {/* Inline Test Result Feedback if triggered */}
                     {testState?.result && (
-                      <div className="mt-3 pt-3 border-t border-slate-800/80 text-xs font-mono flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className="text-slate-400">Response:</span>
+                      <div className="mt-3 pt-3 border-t border-slate-800/80 text-xs font-mono flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div className="flex items-start sm:items-center gap-2 flex-wrap">
+                          <span className="text-slate-400 font-semibold">Response:</span>
+                          {!testState.result.success && (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-950/80 text-rose-300 border border-rose-800/60 uppercase">
+                              {testState.result.status_code === 504 || (testState.result.errorDetails as any)?.type === 'timeout'
+                                ? 'TIMEOUT'
+                                : testState.result.status_code
+                                ? `HTTP ${testState.result.status_code}`
+                                : 'FAILED'}
+                            </span>
+                          )}
                           <span className={testState.result.success ? 'text-emerald-300' : 'text-rose-300'}>
-                            {testState.result.sampleOutput || testState.result.error || testState.result.status}
+                            {testState.result.success
+                              ? testState.result.sampleOutput || 'API connection verified successfully'
+                              : typeof testState.result.error === 'string'
+                              ? testState.result.error
+                              : (testState.result.error as any)?.message ||
+                                (testState.result.errorDetails as any)?.message ||
+                                testState.result.status}
                           </span>
                         </div>
-                        {testState.result.latencyMs && (
-                          <span className="text-slate-400">{testState.result.latencyMs} ms</span>
+                        {Boolean(testState.result.latencyMs || testState.result.latency_ms) && (
+                          <span className="text-slate-500 shrink-0">
+                            {testState.result.latencyMs || testState.result.latency_ms} ms
+                          </span>
                         )}
                       </div>
                     )}

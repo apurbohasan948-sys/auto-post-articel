@@ -274,17 +274,31 @@ export const handler = async (event: any) => {
     if ((path === '/providers/test' || path === '/providers/ai/test') && method === 'POST') {
       let target = body.provider;
       if (body.providerId) {
-        target = storage.getAIProviders().find((p) => p.id === body.providerId);
+        const stored = storage.getAIProviders().find((p) => p.id === body.providerId);
+        if (stored) {
+          target = { ...stored, ...(body.provider || {}) };
+          if (target.apiKey && target.apiKey.includes('••••') && stored.apiKey) {
+            target.apiKey = stored.apiKey;
+          }
+        }
       }
       if (!target) {
+        const errorObj = {
+          type: 'provider_not_found',
+          message: 'Provider not found',
+          providerStatus: 404,
+          url: '',
+        };
         return {
           statusCode: 404,
           headers,
           body: JSON.stringify({
+            ok: false,
             success: false,
             status: 'FAILED',
             status_code: 404,
-            error: 'Provider not found',
+            error: errorObj,
+            errorDetails: errorObj,
             latency_ms: 0,
             latencyMs: 0,
             timestamp: new Date().toISOString(),
@@ -293,10 +307,19 @@ export const handler = async (event: any) => {
       }
       if (target.apiKey && target.apiKey.includes('••••')) {
         const stored = storage.getAIProviders().find((p) => p.id === target.id);
-        if (stored) target.apiKey = stored.apiKey;
+        if (stored && stored.apiKey && !stored.apiKey.includes('••••')) {
+          target.apiKey = stored.apiKey;
+        }
       }
-      const testResult = await testingService.testAIProvider(target, body.prompt || 'Write one short sentence about technology.');
-      const httpStatus = typeof testResult.status === 'number' ? testResult.status : testResult.success ? 200 : 400;
+      const testResult = await testingService.testAIProvider(target, body.prompt || 'Reply with OK');
+      const httpStatus =
+        typeof testResult.status_code === 'number'
+          ? testResult.status_code
+          : typeof testResult.status === 'number'
+          ? testResult.status
+          : testResult.success
+          ? 200
+          : 400;
       return { statusCode: httpStatus, headers, body: JSON.stringify(testResult) };
     }
 

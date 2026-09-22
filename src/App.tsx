@@ -243,7 +243,7 @@ export default function App() {
       setApiErrors(errorsEncountered);
 
       // Safe Diagnostic Logging (scrubbed of secrets)
-      if (process.env.NODE_ENV !== 'production' && !initialLoadCompletedRef.current) {
+      if (import.meta.env.DEV && !initialLoadCompletedRef.current) {
         console.log('[Axiom Diagnostics] Application startup telemetry initialized successfully.');
       }
     } catch (err: unknown) {
