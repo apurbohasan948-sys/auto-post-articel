@@ -22,6 +22,7 @@ import {
   normalizeBloggerConfig,
   normalizeMemory,
 } from './services/apiClient.ts';
+import { providerStore } from './services/providerStore.ts';
 import { safeStorage } from './utils/safeStorage.ts';
 import {
   AgentJob,
@@ -97,9 +98,31 @@ export default function App() {
   const [analytics, setAnalytics] = useState<any>(null);
   const [health, setHealth] = useState<ProviderHealth | undefined>(undefined);
 
-  const [aiProviders, setAiProviders] = useState<AIProviderConfig[]>([]);
-  const [searchProviders, setSearchProviders] = useState<SearchProviderConfig[]>([]);
+  const [aiProviders, setAiProviders] = useState<AIProviderConfig[]>(() => {
+    return providerStore.loadProviders();
+  });
+  const [searchProviders, setSearchProviders] = useState<SearchProviderConfig[]>(() => {
+    return providerStore.loadSearchProviders();
+  });
   const [bloggerConfig, setBloggerConfig] = useState<BloggerConfig>(() => normalizeBloggerConfig(null));
+
+  // Sync state with localStorage-backed providerStore across tab actions
+  useEffect(() => {
+    const unsubAi = providerStore.subscribe((providers) => {
+      setAiProviders(providers);
+    });
+    const unsubTavily = providerStore.subscribeTavily(() => {
+      setSearchProviders(providerStore.loadSearchProviders());
+    });
+    const unsubErr = providerStore.onError((errMsg) => {
+      showToast(errMsg, 'error');
+    });
+    return () => {
+      unsubAi();
+      unsubTavily();
+      unsubErr();
+    };
+  }, []);
 
   // Modals
   const [selectedArticle, setSelectedArticle] = useState<Article | null>(null);
@@ -218,19 +241,9 @@ export default function App() {
         errorsEncountered.database = 'System operational settings unavailable. Using safe defaults.';
       }
 
-      if (aiRes.status === 'fulfilled') {
-        if (fetchStartTime >= lastAiSaveTimeRef.current) {
-          setAiProviders(normalizeAIProviders(aiRes.value));
-        }
-      } else {
-        errorsEncountered.providers = 'AI Providers could not be synchronized from server.';
-      }
-
-      if (searchRes.status === 'fulfilled') {
-        if (fetchStartTime >= lastSearchSaveTimeRef.current) {
-          setSearchProviders(normalizeSearchProviders(searchRes.value));
-        }
-      }
+      // AI and Search providers are authoritatively loaded from providerStore (localStorage)
+      setAiProviders(providerStore.loadProviders());
+      setSearchProviders(providerStore.loadSearchProviders());
 
       if (bloggerRes.status === 'fulfilled' && bloggerRes.value) {
         setBloggerConfig(normalizeBloggerConfig(bloggerRes.value));

@@ -27,6 +27,7 @@ import {
   SystemSettings,
   TopicCandidate,
 } from '../types/agent.ts';
+import { providerStore } from './providerStore.ts';
 
 export interface SafeApiResult<T> {
   success: boolean;
@@ -315,10 +316,16 @@ export function normalizeHealth(raw: any): ProviderHealth {
 export const apiClient = {
   // Agent Lifecycle
   runCycle: async (topicId?: string): Promise<{ success: boolean; job?: AgentJob; error?: string }> => {
+    const enabledProviders = providerStore.getEnabledProviders();
+    const tavilyConfig = providerStore.loadTavilyConfig();
     const res = await safeApiCall<any>('/api/agent/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ topicId }),
+      body: JSON.stringify({
+        topicId,
+        aiProviders: enabledProviders,
+        tavilyConfig,
+      }),
     });
     if (!res.success) {
       throw new Error(res.error || 'Failed to trigger cycle');
@@ -453,54 +460,41 @@ export const apiClient = {
     return normalizeSettings(res.data);
   },
 
-  // AI Providers
+  // AI Providers (Backed by browser localStorage via providerStore as single source of truth)
   getAIProviders: async (): Promise<AIProviderConfig[]> => {
-    // Primary RESTful endpoint
-    const res = await safeApiCall<any>('/api/providers');
-    if (res.success && Array.isArray(res.data?.providers)) {
-      return normalizeAIProviders(res.data.providers);
-    }
-    // Fallback to legacy path
-    const fallbackRes = await safeApiCall<any>('/api/providers/ai');
-    if (fallbackRes.success && Array.isArray(fallbackRes.data?.providers)) {
-      return normalizeAIProviders(fallbackRes.data.providers);
-    }
-    return [];
+    return providerStore.loadProviders();
   },
 
   saveAIProvider: async (
     provider: Partial<AIProviderConfig>
   ): Promise<{ success: boolean; provider: AIProviderConfig }> => {
-    const res = await safeApiCall<any>('/api/providers', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider }),
-    });
-    if (!res.success || !res.data?.success) {
-      throw new Error(res.error || res.data?.error || 'Failed to save AI provider');
+    let saved: AIProviderConfig | null = null;
+    if (provider.id && providerStore.getProviderById(provider.id)) {
+      saved = providerStore.updateProvider(provider.id, provider);
+    } else {
+      saved = providerStore.addProvider(provider);
     }
+
+    if (!saved) {
+      throw new Error('Failed to save AI provider configuration to localStorage');
+    }
+
     return {
       success: true,
-      provider: normalizeAIProviders([res.data.provider])[0],
+      provider: saved,
     };
   },
 
   deleteAIProvider: async (id: string): Promise<{ success: boolean }> => {
-    const res = await safeApiCall<{ success: boolean }>(`/api/providers/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-    });
-    return { success: Boolean(res.data?.success || res.success) };
+    const success = providerStore.deleteProvider(id);
+    return { success };
   },
 
   reorderAIProviders: async (ids: string[]): Promise<{ success: boolean; providers: AIProviderConfig[] }> => {
-    const res = await safeApiCall<any>('/api/providers/reorder', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids }),
-    });
+    const reordered = providerStore.reorderProviders(ids);
     return {
-      success: res.success,
-      providers: normalizeAIProviders(res.data?.providers),
+      success: true,
+      providers: reordered,
     };
   },
 
@@ -508,17 +502,13 @@ export const apiClient = {
     id: string,
     enabled: boolean
   ): Promise<{ success: boolean; provider: AIProviderConfig }> => {
-    const res = await safeApiCall<any>(`/api/providers/${encodeURIComponent(id)}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled }),
-    });
-    if (!res.success) {
-      throw new Error(res.error || 'Failed to toggle AI provider');
+    const updated = providerStore.toggleProvider(id, enabled);
+    if (!updated) {
+      throw new Error('Provider not found');
     }
     return {
       success: true,
-      provider: normalizeAIProviders([res.data?.provider])[0],
+      provider: updated,
     };
   },
 
@@ -527,36 +517,80 @@ export const apiClient = {
     provider?: AIProviderConfig;
     prompt?: string;
   }): Promise<AITestResult> => {
+    // 1. Resolve provider directly from ProviderStore/localStorage (never stale state)
+    let targetProvider = params.providerId ? providerStore.getProviderById(params.providerId) : null;
+    if (!targetProvider && params.provider?.id) {
+      targetProvider = providerStore.getProviderById(params.provider.id);
+    }
+    if (!targetProvider && params.provider) {
+      targetProvider = params.provider;
+    }
+
+    if (params.provider && targetProvider) {
+      // If modal passed an explicit new key (unmasked), use it
+      if (params.provider.apiKey && !params.provider.apiKey.includes('••••')) {
+        targetProvider = { ...targetProvider, ...params.provider };
+      } else {
+        // preserve unmasked key from storage
+        targetProvider = { ...targetProvider, ...params.provider, apiKey: targetProvider.apiKey };
+      }
+    }
+
+    const payload = {
+      providerId: targetProvider?.id || params.providerId,
+      provider: targetProvider,
+      prompt: params.prompt,
+    };
+
     const res = await safeApiCall<AITestResult>('/api/providers/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
+      body: JSON.stringify(payload),
     });
+
+    let resultData: AITestResult;
     if (res.data) {
       const data = { ...res.data };
       if (typeof data.error === 'object' && data.error !== null) {
         data.errorDetails = data.error as any;
         data.error = (data.error as any).message || JSON.stringify(data.error);
       }
-      return data;
+      resultData = data;
+    } else {
+      resultData = {
+        ok: false,
+        success: false,
+        status: 'FAILED',
+        status_code: res.statusCode || 500,
+        latencyMs: 0,
+        providerId: targetProvider?.id || params.providerId || 'unknown',
+        provider: targetProvider?.name || 'Unknown',
+        model: targetProvider?.modelName || targetProvider?.model || '',
+        error: res.error || `HTTP request failed with status ${res.statusCode || 500}`,
+        errorDetails: {
+          type: 'network_error',
+          message: res.error || `HTTP request failed with status ${res.statusCode || 500}`,
+          providerStatus: res.statusCode || 500,
+        },
+        timestamp: new Date().toISOString(),
+      };
     }
-    return {
-      ok: false,
-      success: false,
-      status: 'FAILED',
-      status_code: res.statusCode || 500,
-      latencyMs: 0,
-      providerId: params.providerId || params.provider?.id || 'unknown',
-      provider: params.provider?.name || 'Unknown',
-      model: params.provider?.modelName || params.provider?.defaultModel || '',
-      error: res.error || `HTTP request failed with status ${res.statusCode || 500}`,
-      errorDetails: {
-        type: 'network_error',
-        message: res.error || `HTTP request failed with status ${res.statusCode || 500}`,
-        providerStatus: res.statusCode || 500,
-      },
-      timestamp: new Date().toISOString(),
-    };
+
+    // Update test diagnostics in localStorage (failure MUST NEVER delete or clear the provider)
+    if (targetProvider?.id) {
+      providerStore.updateProvider(targetProvider.id, {
+        lastTestedAt: new Date().toISOString(),
+        lastTestStatus: resultData.success ? 'SUCCESS' : 'FAILED',
+        lastLatencyMs: resultData.latencyMs || resultData.latency_ms || 0,
+        lastError: resultData.success
+          ? undefined
+          : typeof resultData.error === 'string'
+          ? resultData.error
+          : resultData.errorDetails?.message,
+      });
+    }
+
+    return resultData;
   },
 
   runAIPlayground: async (params: {
@@ -564,10 +598,14 @@ export const apiClient = {
     provider?: AIProviderConfig;
     prompt?: string;
   }): Promise<AITestResult> => {
+    const provider = params.providerId ? providerStore.getProviderById(params.providerId) : params.provider;
     const res = await safeApiCall<AITestResult>('/api/providers/ai/playground', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
+      body: JSON.stringify({
+        ...params,
+        provider: provider || params.provider,
+      }),
     });
     if (res.data) {
       const data = { ...res.data };
@@ -608,78 +646,97 @@ export const apiClient = {
   },
 
   updateAIProviders: async (providers: AIProviderConfig[]) => {
-    return safeApiCall<{ success: boolean }>('/api/providers/ai', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ providers }),
-    });
+    providerStore.saveProviders(providers);
+    return { success: true };
   },
 
-  // Search Providers
+  // Search Providers (Backed by browser localStorage & tara_tavily_config)
   getSearchProviders: async (): Promise<SearchProviderConfig[]> => {
-    const res = await safeApiCall<any>('/api/search-providers');
-    if (res.success && Array.isArray(res.data?.providers)) {
-      return normalizeSearchProviders(res.data.providers);
-    }
-    const fallbackRes = await safeApiCall<any>('/api/providers/search');
-    if (fallbackRes.success && Array.isArray(fallbackRes.data?.providers)) {
-      return normalizeSearchProviders(fallbackRes.data.providers);
-    }
-    return [];
+    return providerStore.loadSearchProviders();
   },
 
   saveSearchProvider: async (
     provider: Partial<SearchProviderConfig>
   ): Promise<{ success: boolean; provider: SearchProviderConfig }> => {
-    const res = await safeApiCall<any>('/api/search-providers', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider }),
-    });
-    if (!res.success || !res.data?.success) {
-      throw new Error(res.error || res.data?.error || 'Failed to save search provider');
+    const list = providerStore.loadSearchProviders();
+    const existingIndex = list.findIndex((p) => p.id === provider.id);
+    let updatedList: SearchProviderConfig[];
+    let savedProvider: SearchProviderConfig;
+
+    if (existingIndex >= 0) {
+      const existing = list[existingIndex];
+      let resolvedKey = existing.apiKey;
+      if (typeof provider.apiKey === 'string') {
+        const trimmed = provider.apiKey.trim();
+        if (trimmed && !trimmed.includes('••••')) {
+          resolvedKey = trimmed;
+        }
+      }
+      savedProvider = {
+        ...existing,
+        ...provider,
+        apiKey: resolvedKey,
+        hasKey: Boolean(resolvedKey),
+        updatedAt: new Date().toISOString(),
+      } as SearchProviderConfig;
+      list[existingIndex] = savedProvider;
+      updatedList = [...list];
+    } else {
+      savedProvider = {
+        id: provider.id || `search-${Date.now()}`,
+        name: provider.name || 'Custom Search Provider',
+        type: provider.type || 'custom',
+        apiKey: provider.apiKey || '',
+        hasKey: Boolean(provider.apiKey),
+        baseUrl: provider.baseUrl || 'https://api.tavily.com',
+        searchDepth: provider.searchDepth || 'advanced',
+        maxResults: provider.maxResults || 6,
+        priority: provider.priority || list.length + 1,
+        enabled: provider.enabled !== undefined ? provider.enabled : true,
+      } as SearchProviderConfig;
+      updatedList = [...list, savedProvider];
     }
+
+    providerStore.saveSearchProviders(updatedList);
     return {
       success: true,
-      provider: normalizeSearchProviders([res.data.provider])[0],
+      provider: savedProvider,
     };
   },
 
   deleteSearchProvider: async (id: string): Promise<{ success: boolean }> => {
-    const res = await safeApiCall<{ success: boolean }>(`/api/search-providers/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-    });
-    return { success: Boolean(res.data?.success || res.success) };
+    const list = providerStore.loadSearchProviders();
+    const filtered = list.filter((p) => p.id !== id);
+    providerStore.saveSearchProviders(filtered);
+    return { success: true };
   },
 
   reorderSearchProviders: async (ids: string[]): Promise<{ success: boolean; providers: SearchProviderConfig[] }> => {
-    const res = await safeApiCall<any>('/api/search-providers/reorder', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids }),
+    const list = providerStore.loadSearchProviders();
+    const map = new Map(list.map((p) => [p.id, p]));
+    const reordered: SearchProviderConfig[] = [];
+    ids.forEach((id, idx) => {
+      const p = map.get(id);
+      if (p) {
+        reordered.push({ ...p, priority: idx + 1 });
+        map.delete(id);
+      }
     });
-    return {
-      success: res.success,
-      providers: normalizeSearchProviders(res.data?.providers),
-    };
+    map.forEach((p) => reordered.push({ ...p, priority: reordered.length + 1 }));
+    providerStore.saveSearchProviders(reordered);
+    return { success: true, providers: reordered };
   },
 
   toggleSearchProvider: async (
     id: string,
     enabled: boolean
   ): Promise<{ success: boolean; provider: SearchProviderConfig }> => {
-    const res = await safeApiCall<any>(`/api/search-providers/${encodeURIComponent(id)}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled }),
-    });
-    if (!res.success) {
-      throw new Error(res.error || 'Failed to toggle search provider');
-    }
-    return {
-      success: true,
-      provider: normalizeSearchProviders([res.data?.provider])[0],
-    };
+    const list = providerStore.loadSearchProviders();
+    const target = list.find((p) => p.id === id);
+    if (!target) throw new Error('Search provider not found');
+    target.enabled = enabled;
+    providerStore.saveSearchProviders(list);
+    return { success: true, provider: target };
   },
 
   testSearchProvider: async (params: {
@@ -689,23 +746,59 @@ export const apiClient = {
     depth?: 'basic' | 'advanced';
     maxResults?: number;
   }): Promise<SearchTestResult> => {
+    let targetProvider = params.provider;
+    if (!targetProvider && (params.providerId === 'search_tavily' || !params.providerId)) {
+      const tavily = providerStore.loadTavilyConfig();
+      targetProvider = {
+        id: 'search_tavily',
+        name: 'Tavily AI Search',
+        type: 'tavily',
+        apiKey: tavily.apiKey,
+        baseUrl: tavily.baseUrl || 'https://api.tavily.com',
+        searchDepth: tavily.searchDepth || 'advanced',
+        maxResults: tavily.maxResults || 6,
+        priority: 1,
+        enabled: tavily.enabled,
+      };
+    } else if (!targetProvider && params.providerId) {
+      const list = providerStore.loadSearchProviders();
+      targetProvider = list.find((p) => p.id === params.providerId);
+    }
+
+    const payload = {
+      ...params,
+      provider: targetProvider,
+    };
+
     const res = await safeApiCall<SearchTestResult>('/api/search/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
+      body: JSON.stringify(payload),
     });
-    if (res.data) return res.data;
-    return {
+
+    const resultData: SearchTestResult = res.data || {
       success: false,
       status: 'FAILED',
       latencyMs: 0,
-      providerId: params.providerId || 'unknown',
-      provider: params.provider?.name || 'Unknown Search Provider',
+      providerId: targetProvider?.id || 'unknown',
+      provider: targetProvider?.name || 'Unknown Search Provider',
       resultsCount: 0,
       results: [],
       error: res.error || 'Search probe failed',
       timestamp: new Date().toISOString(),
     };
+
+    // Update test status in localStorage
+    if (targetProvider?.type === 'tavily' || targetProvider?.id === 'search_tavily') {
+      providerStore.saveTavilyConfig({
+        lastTestedAt: new Date().toISOString(),
+        lastTestStatus: resultData.success ? 'SUCCESS' : 'FAILED',
+        lastLatencyMs: resultData.latencyMs,
+        lastError: resultData.success ? undefined : typeof resultData.error === 'string' ? resultData.error : 'Failed',
+      });
+    }
+
+    return resultData;
   },
 
   runSearchPlayground: async (params: {
@@ -715,10 +808,18 @@ export const apiClient = {
     depth?: 'basic' | 'advanced';
     maxResults?: number;
   }): Promise<SearchTestResult> => {
+    let targetProvider = params.provider;
+    if (!targetProvider && params.providerId) {
+      const list = providerStore.loadSearchProviders();
+      targetProvider = list.find((p) => p.id === params.providerId);
+    }
     const res = await safeApiCall<SearchTestResult>('/api/providers/search/playground', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
+      body: JSON.stringify({
+        ...params,
+        provider: targetProvider,
+      }),
     });
     if (res.data) return res.data;
     return {
@@ -755,20 +856,48 @@ export const apiClient = {
   },
 
   exportProvidersConfig: async (includeSecrets = false): Promise<any> => {
-    const res = await safeApiCall<any>(`/api/providers/export?includeSecrets=${encodeURIComponent(includeSecrets)}`);
-    return res.data || {};
+    const aiProviders = providerStore.loadProviders().map((p) => ({
+      ...p,
+      apiKey: includeSecrets ? p.apiKey : p.apiKey ? '••••••••' : '',
+    }));
+    const tavilyConfig = providerStore.loadTavilyConfig();
+    const searchProviders = providerStore.loadSearchProviders().map((p) => ({
+      ...p,
+      apiKey: includeSecrets ? p.apiKey : p.apiKey ? '••••••••' : '',
+    }));
+    return {
+      version: '2.0.0',
+      exportedAt: new Date().toISOString(),
+      aiProviders,
+      searchProviders,
+      tavilyConfig: {
+        ...tavilyConfig,
+        apiKey: includeSecrets ? tavilyConfig.apiKey : tavilyConfig.apiKey ? '••••••••' : '',
+      },
+    };
   },
 
   importProvidersConfig: async (config: any): Promise<{ success: boolean; aiCount: number; searchCount: number }> => {
-    const res = await safeApiCall<any>('/api/providers/import', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ config }),
-    });
+    if (!config || typeof config !== 'object') {
+      throw new Error('Invalid configuration object');
+    }
+    let aiCount = 0;
+    let searchCount = 0;
+    if (Array.isArray(config.aiProviders)) {
+      providerStore.saveProviders(config.aiProviders);
+      aiCount = config.aiProviders.length;
+    }
+    if (Array.isArray(config.searchProviders)) {
+      providerStore.saveSearchProviders(config.searchProviders);
+      searchCount = config.searchProviders.length;
+    }
+    if (config.tavilyConfig) {
+      providerStore.saveTavilyConfig(config.tavilyConfig);
+    }
     return {
-      success: Boolean(res.data?.success),
-      aiCount: typeof res.data?.aiCount === 'number' ? res.data.aiCount : 0,
-      searchCount: typeof res.data?.searchCount === 'number' ? res.data.searchCount : 0,
+      success: true,
+      aiCount,
+      searchCount,
     };
   },
 

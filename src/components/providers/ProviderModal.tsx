@@ -310,9 +310,10 @@ export const ProviderModal: React.FC<ProviderModalProps> = ({
                 }
                 className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-sm text-white focus:outline-none focus:border-cyan-500 font-mono"
               >
+                <option value="openai-compatible">OpenAI Compatible (v1/chat/completions)</option>
                 <option value="openrouter">OpenRouter (Unified)</option>
                 <option value="gemini">Google Gemini SDK</option>
-                <option value="custom_openai">OpenAI Compatible (v1/chat/completions)</option>
+                <option value="custom_openai">Custom OpenAI Gateway</option>
                 <option value="custom_rest">Custom REST Endpoint</option>
               </select>
             </div>
@@ -357,15 +358,15 @@ export const ProviderModal: React.FC<ProviderModalProps> = ({
             </div>
           </div>
 
-          {/* API Key (Encrypted Server-Side) */}
+          {/* API Key */}
           <div className="space-y-1.5">
             <div className="flex items-center justify-between">
               <label className="text-xs font-medium text-slate-300 font-mono flex items-center gap-1.5">
                 <Key className="w-3.5 h-3.5 text-cyan-400" />
-                API Key (Stored with AES-256 Server-Side Encryption)
+                API Key (Authoritative in browser localStorage)
               </label>
               <span className="text-[11px] text-slate-500 font-mono">
-                {formData.hasKey ? 'Key is currently configured' : 'No key stored'}
+                {formData.hasKey ? 'Key is configured' : 'No key stored'}
               </span>
             </div>
             <div className="relative">

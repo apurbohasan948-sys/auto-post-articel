@@ -32,7 +32,26 @@ const testingService = ProviderTestingService.getInstance();
 // Trigger Run Now
 app.post('/api/agent/run', async (req: Request, res: Response) => {
   try {
-    const { topicId, isManualApprovalRun } = req.body || {};
+    const { topicId, isManualApprovalRun, aiProviders, tavilyConfig } = req.body || {};
+    if (Array.isArray(aiProviders) && aiProviders.length > 0) {
+      storage.updateAIProviders(aiProviders);
+    }
+    if (tavilyConfig && tavilyConfig.apiKey) {
+      const tavily = storage.getSearchProviders().find((p) => p.type === 'tavily') || {
+        id: 'search_tavily',
+        name: 'Tavily AI Search',
+        type: 'tavily',
+        baseUrl: tavilyConfig.baseUrl || 'https://api.tavily.com',
+        priority: 1,
+      };
+      storage.saveSearchProvider({
+        ...tavily,
+        apiKey: tavilyConfig.apiKey,
+        enabled: tavilyConfig.enabled ?? true,
+        baseUrl: tavilyConfig.baseUrl || 'https://api.tavily.com',
+      });
+    }
+
     // Run cycle asynchronously or await based on query
     const runPromise = orchestrator.runCycle({ specificTopicId: topicId, isManualApprovalRun });
     

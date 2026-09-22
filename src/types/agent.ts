@@ -244,9 +244,11 @@ export interface AIProviderConfig {
   hasKey?: boolean;
   modelName: string;
   defaultModel?: string;
+  model?: string;
   priority: number;
   enabled: boolean;
   timeoutMs: number;
+  timeout?: number;
   maxRetries?: number;
   maxTokens?: number;
   temperature?: number;
