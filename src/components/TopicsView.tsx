@@ -21,7 +21,7 @@ interface TopicsViewProps {
 }
 
 export const TopicsView: React.FC<TopicsViewProps> = ({
-  topics,
+  topics = [],
   isScouting,
   onScoutTopics,
   onRunCycleForTopic,
@@ -29,14 +29,16 @@ export const TopicsView: React.FC<TopicsViewProps> = ({
   const [filter, setFilter] = useState<'ALL' | 'APPROVED' | 'CANDIDATE' | 'REJECTED'>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
 
-  const filtered = topics.filter((t) => {
+  const safeTopics = Array.isArray(topics) ? topics : [];
+  const filtered = safeTopics.filter((t) => {
+    if (!t) return false;
     if (filter === 'APPROVED' && t.decisionStatus !== 'APPROVED') return false;
     if (filter === 'REJECTED' && t.decisionStatus !== 'REJECTED') return false;
     if (filter === 'CANDIDATE' && t.decisionStatus) return false;
     if (
       searchQuery &&
-      !t.topic.toLowerCase().includes(searchQuery.toLowerCase()) &&
-      !t.suggestedTitle.toLowerCase().includes(searchQuery.toLowerCase())
+      !(t.topic || '').toLowerCase().includes(searchQuery.toLowerCase()) &&
+      !(t.suggestedTitle || '').toLowerCase().includes(searchQuery.toLowerCase())
     )
       return false;
     return true;

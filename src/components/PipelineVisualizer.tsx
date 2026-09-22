@@ -124,13 +124,13 @@ export const PipelineVisualizer: React.FC<PipelineVisualizerProps> = ({ currentJ
   const [selectedNode, setSelectedNode] = useState<StepMeta>(PIPELINE_NODES[0]);
 
   const getStepStatus = (stepName: PipelineStep) => {
-    if (!currentJob) return 'PENDING';
+    if (!currentJob || !Array.isArray(currentJob.steps)) return 'PENDING';
     const found = currentJob.steps.find((s) => s.step === stepName);
     return found ? found.status : 'PENDING';
   };
 
   const getStepRecord = (stepName: PipelineStep) => {
-    if (!currentJob) return null;
+    if (!currentJob || !Array.isArray(currentJob.steps)) return null;
     return currentJob.steps.find((s) => s.step === stepName) || null;
   };
 

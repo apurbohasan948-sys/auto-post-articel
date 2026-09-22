@@ -21,7 +21,14 @@ export const PublishingView: React.FC<PublishingViewProps> = ({
   bloggerConfig,
   onUpdateBlogger,
 }) => {
-  const [config, setConfig] = useState<BloggerConfig>(bloggerConfig);
+  const [config, setConfig] = useState<BloggerConfig>(() => ({
+    blogId: bloggerConfig?.blogId || '',
+    blogUrl: bloggerConfig?.blogUrl || '',
+    defaultLabels: Array.isArray(bloggerConfig?.defaultLabels)
+      ? bloggerConfig.defaultLabels
+      : ['Technology', 'AI Systems'],
+    isConnected: Boolean(bloggerConfig?.isConnected),
+  }));
   const [isSaved, setIsSaved] = useState(false);
 
   const handleSave = (e: React.FormEvent) => {
@@ -147,7 +154,7 @@ export const PublishingView: React.FC<PublishingViewProps> = ({
             </label>
             <input
               type="text"
-              value={config.defaultLabels.join(', ')}
+              value={(config.defaultLabels || []).join(', ')}
               onChange={(e) =>
                 setConfig({
                   ...config,

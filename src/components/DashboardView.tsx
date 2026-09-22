@@ -42,24 +42,37 @@ interface DashboardViewProps {
 export const DashboardView: React.FC<DashboardViewProps> = ({
   settings,
   activeJob,
-  recentJobs,
-  articles,
-  topics,
-  logs,
+  recentJobs = [],
+  articles = [],
+  topics = [],
+  logs = [],
   health,
   isTriggering,
   onRunNow,
   onViewArticle,
   onViewAllArticles,
 }) => {
-  const publishedArticles = articles.filter(
-    (a) => a.lifecycleState === 'PUBLISHED' || a.lifecycleState === 'DISTRIBUTED'
-  );
-  const pendingArticles = articles.filter((a) => a.lifecycleState === 'APPROVED');
-  const failedArticles = articles.filter((a) => a.lifecycleState === 'FAILED');
+  const safeArticles = Array.isArray(articles) ? articles : [];
+  const safeTopics = Array.isArray(topics) ? topics : [];
+  const safeLogs = Array.isArray(logs) ? logs : [];
+  const safeTodayStats = settings?.todayStats || {
+    articlesPublished: 0,
+    aiCalls: 0,
+    researchCalls: 0,
+    socialPostsCreated: 0,
+    date: new Date().toISOString().slice(0, 10),
+  };
+  const maxArticles = settings?.maxArticlesPerDay || 3;
+  const articlesPublishedToday = safeTodayStats.articlesPublished || 0;
 
-  const totalSocialPosts = articles.reduce(
-    (acc, a) => acc + (a.socialDistributions?.filter((s) => s.status === 'PUBLISHED').length || 0),
+  const publishedArticles = safeArticles.filter(
+    (a) => a && (a.lifecycleState === 'PUBLISHED' || a.lifecycleState === 'DISTRIBUTED')
+  );
+  const pendingArticles = safeArticles.filter((a) => a && a.lifecycleState === 'APPROVED');
+  const failedArticles = safeArticles.filter((a) => a && a.lifecycleState === 'FAILED');
+
+  const totalSocialPosts = safeArticles.reduce(
+    (acc, a) => acc + (a?.socialDistributions?.filter((s) => s.status === 'PUBLISHED').length || 0),
     0
   );
 
@@ -80,7 +93,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               {publishedArticles.length}
             </span>
             <span className="text-xs text-slate-500">
-              of {settings.todayStats.articlesPublished}/{settings.maxArticlesPerDay} today limit
+              of {articlesPublishedToday}/{maxArticles} today limit
             </span>
           </div>
           <div className="mt-3 w-full bg-slate-800/80 rounded-full h-1.5 overflow-hidden">
@@ -89,7 +102,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               style={{
                 width: `${Math.min(
                   100,
-                  (settings.todayStats.articlesPublished / settings.maxArticlesPerDay) * 100
+                  maxArticles > 0 ? (articlesPublishedToday / maxArticles) * 100 : 0
                 )}%`,
               }}
             ></div>
@@ -109,12 +122,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               {pendingArticles.length}
             </span>
             <span className="text-xs text-slate-500">
-              {settings.mode === 'APPROVAL' ? 'awaiting manual publish' : 'auto-publish active'}
+              {settings?.mode === 'APPROVAL' ? 'awaiting manual publish' : 'auto-publish active'}
             </span>
           </div>
           <div className="mt-3 text-xs text-indigo-300 flex items-center gap-1">
             <Clock className="w-3.5 h-3.5" />
-            <span>Mode: {settings.mode}</span>
+            <span>Mode: {settings?.mode || 'AUTO'}</span>
           </div>
         </div>
 
@@ -148,13 +161,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
           <div className="flex items-baseline gap-2">
             <span className="text-2xl sm:text-3xl font-bold text-white font-display">
-              {topics.length}
+              {safeTopics.length}
             </span>
             <span className="text-xs text-slate-500">evaluated candidates</span>
           </div>
           <div className="mt-3 text-xs text-purple-300 flex items-center gap-1">
             <Activity className="w-3.5 h-3.5" />
-            <span>Niche: {settings.contentNiche}</span>
+            <span>Niche: {settings?.contentNiche || settings?.niche || 'Autonomous AI Systems'}</span>
           </div>
         </div>
       </div>
@@ -214,13 +227,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               onClick={onViewAllArticles}
               className="text-xs text-cyan-400 hover:text-cyan-300 flex items-center gap-1 font-semibold"
             >
-              View all ({articles.length})
+              View all ({safeArticles.length})
               <ChevronRight className="w-3.5 h-3.5" />
             </button>
           </div>
 
           <div className="space-y-2.5">
-            {articles.slice(0, 4).map((art) => (
+            {safeArticles.slice(0, 4).map((art) => (
               <div
                 key={art.id}
                 onClick={() => onViewArticle(art)}
@@ -244,16 +257,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                         {new Date(art.createdAt).toLocaleDateString()}
                       </span>
                       <span className="text-[11px] text-slate-500 font-mono">
-                        {art.cleanContent.split(/\s+/).length} words
+                        {(art.cleanContent || '').split(/\s+/).filter(Boolean).length} words
                       </span>
                     </div>
 
                     <h4 className="text-sm font-semibold text-white group-hover:text-cyan-300 transition-colors">
-                      {art.title}
+                      {art.title || 'Untitled Article'}
                     </h4>
 
                     <p className="text-xs text-slate-400 line-clamp-2">
-                      {art.metaDescription}
+                      {art.metaDescription || ''}
                     </p>
                   </div>
 
@@ -261,7 +274,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     <span className="inline-flex items-center gap-1 text-xs text-cyan-400 group-hover:translate-x-0.5 transition-transform">
                       Review <ArrowUpRight className="w-3.5 h-3.5" />
                     </span>
-                    {art.qualityReport && (
+                    {art.qualityReport && art.qualityReport.scoreBreakdown && (
                       <div className="text-[10px] font-mono text-emerald-400 mt-1">
                         Quality: {art.qualityReport.scoreBreakdown.factualConsistency}%
                       </div>
@@ -271,7 +284,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </div>
             ))}
 
-            {articles.length === 0 && (
+            {safeArticles.length === 0 && (
               <div className="p-8 text-center rounded-xl bg-slate-900/40 border border-slate-800 text-slate-500 text-xs">
                 No articles generated yet. Click "Run Autonomous Cycle Now" to start the first cycle.
               </div>
@@ -290,7 +303,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
 
           <div className="cyber-panel p-3.5 rounded-xl border border-slate-800 font-mono text-xs max-h-[410px] overflow-y-auto space-y-2">
-            {logs.slice(0, 12).map((log) => (
+            {safeLogs.slice(0, 12).map((log) => (
               <div
                 key={log.id}
                 className="pb-2 border-b border-slate-800/60 last:border-0 last:pb-0 space-y-0.5"

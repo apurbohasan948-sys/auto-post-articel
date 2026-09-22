@@ -14,7 +14,15 @@ import { LogsView } from './components/LogsView.tsx';
 import { SettingsView } from './components/SettingsView.tsx';
 import { ArticleReviewModal } from './components/ArticleReviewModal.tsx';
 import { NetlifyGuideModal } from './components/NetlifyGuideModal.tsx';
-import { apiClient } from './services/apiClient.ts';
+import {
+  apiClient,
+  normalizeAIProviders,
+  normalizeSearchProviders,
+  normalizeSettings,
+  normalizeBloggerConfig,
+  normalizeMemory,
+} from './services/apiClient.ts';
+import { safeStorage } from './utils/safeStorage.ts';
 import {
   AgentJob,
   AgentMemory,
@@ -28,68 +36,76 @@ import {
   SystemSettings,
   TopicCandidate,
 } from './types/agent.ts';
+import { AlertCircle, RefreshCw, Database, Cpu } from 'lucide-react';
+
+export type AppLifecycleState = 'INITIALIZING' | 'LOADING' | 'READY' | 'ERROR';
+
+/**
+ * Maps browser URL pathname to corresponding NavTab safely.
+ */
+function getTabFromPath(pathname: string): NavTab {
+  const clean = pathname.toLowerCase().replace(/\/+$/, '') || '/';
+  if (clean === '/' || clean === '/dashboard') return 'dashboard';
+  if (clean === '/pipeline') return 'pipeline';
+  if (clean === '/topics') return 'topics';
+  if (clean === '/articles') return 'articles';
+  if (clean === '/research') return 'research';
+  if (clean === '/publishing') return 'publishing';
+  if (clean === '/providers' || clean === '/settings/apis' || clean === '/apis') return 'providers';
+  if (clean === '/diagnostics') return 'diagnostics';
+  if (clean === '/analytics') return 'analytics';
+  if (clean === '/logs') return 'logs';
+  if (clean === '/settings') return 'settings';
+  return 'dashboard';
+}
+
+function getPathForTab(tab: NavTab): string {
+  if (tab === 'dashboard') return '/';
+  return `/${tab}`;
+}
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<NavTab>('dashboard');
+  // Application Lifecycle State
+  const [appState, setAppState] = useState<AppLifecycleState>('INITIALIZING');
+  const [apiErrors, setApiErrors] = useState<{
+    providers?: string;
+    database?: string;
+    general?: string;
+  }>({});
+
+  // Client Routing State with History and Popstate Sync
+  const [activeTab, setActiveTab] = useState<NavTab>(() => {
+    if (typeof window !== 'undefined') {
+      return getTabFromPath(window.location.pathname);
+    }
+    return 'dashboard';
+  });
+
   const [status, setStatus] = useState<'IDLE' | 'RUNNING' | 'PAUSED' | 'STOPPED'>('IDLE');
   const [mode, setMode] = useState<'AUTO' | 'APPROVAL'>('AUTO');
   const [activeJob, setActiveJob] = useState<AgentJob | null>(null);
   const [jobs, setJobs] = useState<AgentJob[]>([]);
 
-  const [settings, setSettings] = useState<SystemSettings>({
-    status: 'IDLE',
-    mode: 'AUTO',
-    language: 'English',
-    niche: 'Autonomous AI Systems & Cloud Infrastructure',
-    contentNiche: 'Autonomous AI Systems & Cloud Infrastructure',
-    subNiches: ['Multi-Agent Architecture', 'Serverless Cron', 'Empirical Research'],
-    targetAudience: 'Software Engineers, Architects, and Tech Leaders',
-    countryRegion: 'Global',
-    keywords: ['Autonomous AI', 'Agent Orchestration', 'Netlify Serverless'],
-    excludedKeywords: ['crypto pumps', 'get rich quick', 'unverified rumors'],
-    articleFrequencyPerDay: 3,
-    maxArticlesPerDay: 3,
-    maxAiCallsPerDay: 60,
-    maxAICallsPerDay: 60,
-    maxResearchCallsPerDay: 20,
-    maxWebSearchesPerDay: 20,
-    maxTokensPerArticle: 4000,
-    maxRewriteAttempts: 2,
-    timezone: 'UTC',
-    activeDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'],
-    quietHoursStart: 23,
-    quietHoursEnd: 6,
-    todayStats: {
-      aiCalls: 0,
-      researchCalls: 0,
-      articlesPublished: 0,
-      socialPostsCreated: 0,
-      date: new Date().toISOString().slice(0, 10),
-    },
-  });
+  // Default normalized SystemSettings
+  const [settings, setSettings] = useState<SystemSettings>(() => normalizeSettings(null));
 
   const [topics, setTopics] = useState<TopicCandidate[]>([]);
   const [articles, setArticles] = useState<Article[]>([]);
   const [researchPackages, setResearchPackages] = useState<Record<string, ResearchPackage>>({});
   const [logs, setLogs] = useState<SystemLog[]>([]);
-  const [memory, setMemory] = useState<AgentMemory | null>(null);
+  const [memory, setMemory] = useState<AgentMemory>(() => normalizeMemory(null));
   const [analytics, setAnalytics] = useState<any>(null);
   const [health, setHealth] = useState<ProviderHealth | undefined>(undefined);
 
   const [aiProviders, setAiProviders] = useState<AIProviderConfig[]>([]);
   const [searchProviders, setSearchProviders] = useState<SearchProviderConfig[]>([]);
-  const [bloggerConfig, setBloggerConfig] = useState<BloggerConfig>({
-    blogId: '',
-    blogUrl: '',
-    defaultLabels: ['Technology', 'AI Systems'],
-    isConnected: false,
-  });
+  const [bloggerConfig, setBloggerConfig] = useState<BloggerConfig>(() => normalizeBloggerConfig(null));
 
   // Modals
   const [selectedArticle, setSelectedArticle] = useState<Article | null>(null);
   const [showNetlifyGuide, setShowNetlifyGuide] = useState(false);
 
-  // Loading flags
+  // Action status flags
   const [isTriggering, setIsTriggering] = useState(false);
   const [isScouting, setIsScouting] = useState(false);
   const [isArticleActionLoading, setIsArticleActionLoading] = useState(false);
@@ -97,15 +113,40 @@ export default function App() {
 
   const lastAiSaveTimeRef = useRef<number>(0);
   const lastSearchSaveTimeRef = useRef<number>(0);
+  const initialLoadCompletedRef = useRef<boolean>(false);
 
   const showToast = (message: string, type: 'success' | 'error' = 'success') => {
     setNotification({ message, type });
     setTimeout(() => setNotification(null), 4000);
   };
 
-  // Master Data Refresh
+  // URL PopState Listener for browser back/forward and direct refresh
+  useEffect(() => {
+    const handlePopState = () => {
+      const matched = getTabFromPath(window.location.pathname);
+      setActiveTab(matched);
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const handleNavigateTab = (tab: NavTab) => {
+    setActiveTab(tab);
+    try {
+      const targetPath = getPathForTab(tab);
+      if (window.location.pathname !== targetPath) {
+        window.history.pushState(null, '', targetPath);
+      }
+    } catch {
+      // Safe fallback if history is restricted
+    }
+  };
+
+  // Master Data Refresh with granular, non-crashing promise settlement
   const loadData = useCallback(async () => {
     const fetchStartTime = Date.now();
+    const errorsEncountered: { providers?: string; database?: string; general?: string } = {};
+
     try {
       const [
         statusRes,
@@ -137,49 +178,105 @@ export default function App() {
         apiClient.getHealth(),
       ]);
 
-      if (statusRes.status === 'fulfilled') {
-        setStatus(statusRes.value.status as any);
-        setMode(statusRes.value.mode as any);
-        setActiveJob(statusRes.value.activeJob);
+      if (statusRes.status === 'fulfilled' && statusRes.value) {
+        setStatus((statusRes.value.status as any) || 'IDLE');
+        setMode((statusRes.value.mode as any) || 'AUTO');
+        setActiveJob(statusRes.value.activeJob || null);
       }
-      if (topicsRes.status === 'fulfilled') setTopics(topicsRes.value);
-      if (articlesRes.status === 'fulfilled') setArticles(articlesRes.value);
-      if (researchRes.status === 'fulfilled') setResearchPackages(researchRes.value);
-      if (jobsRes.status === 'fulfilled') setJobs(jobsRes.value);
-      if (logsRes.status === 'fulfilled') setLogs(logsRes.value);
-      if (analyticsRes.status === 'fulfilled') setAnalytics(analyticsRes.value);
-      if (memoryRes.status === 'fulfilled') setMemory(memoryRes.value);
-      if (settingsRes.status === 'fulfilled') setSettings(settingsRes.value);
+
+      if (topicsRes.status === 'fulfilled') {
+        setTopics(Array.isArray(topicsRes.value) ? topicsRes.value : []);
+      }
+
+      if (articlesRes.status === 'fulfilled') {
+        setArticles(Array.isArray(articlesRes.value) ? articlesRes.value : []);
+      }
+
+      if (researchRes.status === 'fulfilled' && researchRes.value) {
+        setResearchPackages(researchRes.value);
+      }
+
+      if (jobsRes.status === 'fulfilled') {
+        setJobs(Array.isArray(jobsRes.value) ? jobsRes.value : []);
+      }
+
+      if (logsRes.status === 'fulfilled') {
+        setLogs(Array.isArray(logsRes.value) ? logsRes.value : []);
+      }
+
+      if (analyticsRes.status === 'fulfilled') {
+        setAnalytics(analyticsRes.value);
+      }
+
+      if (memoryRes.status === 'fulfilled' && memoryRes.value) {
+        setMemory(normalizeMemory(memoryRes.value));
+      }
+
+      if (settingsRes.status === 'fulfilled' && settingsRes.value) {
+        setSettings(normalizeSettings(settingsRes.value));
+      } else if (settingsRes.status === 'rejected') {
+        errorsEncountered.database = 'System operational settings unavailable. Using safe defaults.';
+      }
+
       if (aiRes.status === 'fulfilled') {
         if (fetchStartTime >= lastAiSaveTimeRef.current) {
-          setAiProviders(aiRes.value);
+          setAiProviders(normalizeAIProviders(aiRes.value));
         }
+      } else {
+        errorsEncountered.providers = 'AI Providers could not be synchronized from server.';
       }
+
       if (searchRes.status === 'fulfilled') {
         if (fetchStartTime >= lastSearchSaveTimeRef.current) {
-          setSearchProviders(searchRes.value);
+          setSearchProviders(normalizeSearchProviders(searchRes.value));
         }
       }
-      if (bloggerRes.status === 'fulfilled') setBloggerConfig(bloggerRes.value);
-      if (healthRes.status === 'fulfilled') setHealth(healthRes.value.providers);
-    } catch (err) {
-      console.error('[Axiom App] Failed to load data:', err);
+
+      if (bloggerRes.status === 'fulfilled' && bloggerRes.value) {
+        setBloggerConfig(normalizeBloggerConfig(bloggerRes.value));
+      }
+
+      if (healthRes.status === 'fulfilled' && healthRes.value) {
+        setHealth(healthRes.value.providers);
+      }
+
+      setApiErrors(errorsEncountered);
+
+      // Safe Diagnostic Logging (scrubbed of secrets)
+      if (process.env.NODE_ENV !== 'production' && !initialLoadCompletedRef.current) {
+        console.log('[Axiom Diagnostics] Application startup telemetry initialized successfully.');
+      }
+    } catch (err: unknown) {
+      console.warn('[Axiom App] Partial data fetch failure:', err);
+      errorsEncountered.general = 'Some background data services failed to respond.';
+      setApiErrors(errorsEncountered);
+    } finally {
+      initialLoadCompletedRef.current = true;
+      setAppState(Object.keys(errorsEncountered).length > 0 ? 'ERROR' : 'READY');
     }
   }, []);
 
-  // Initial load
+  // Initial load effect
   useEffect(() => {
     loadData();
+
+    // Fallback safety timer: guarantees transition out of INITIALIZING within 3.5 seconds
+    const fallbackTimer = setTimeout(() => {
+      setAppState((curr) => (curr === 'INITIALIZING' ? 'READY' : curr));
+    }, 3500);
+
+    return () => clearTimeout(fallbackTimer);
   }, [loadData]);
 
-  // Polling: high frequency when active job is running (2s), standard when idle (5s)
+  // Telemetry Polling (every 2s if active job running, 5s when idle)
   useEffect(() => {
+    if (appState === 'INITIALIZING') return;
     const intervalMs = activeJob ? 2000 : 5000;
     const timer = setInterval(() => {
       loadData();
     }, intervalMs);
     return () => clearInterval(timer);
-  }, [activeJob, loadData]);
+  }, [activeJob, appState, loadData]);
 
   // Agent Actions
   const handleRunNow = async (topicId?: string) => {
@@ -241,7 +338,7 @@ export default function App() {
     setIsScouting(true);
     try {
       const newTopics = await apiClient.scoutTopics();
-      setTopics(newTopics);
+      setTopics(Array.isArray(newTopics) ? newTopics : []);
       showToast(`Scout completed: discovered ${newTopics.length} candidate topics.`);
       loadData();
     } catch (err: unknown) {
@@ -289,7 +386,7 @@ export default function App() {
   const handleUpdateSettings = async (updated: Partial<SystemSettings>) => {
     try {
       const saved = await apiClient.updateSettings(updated);
-      setSettings(saved);
+      setSettings(normalizeSettings(saved));
       showToast('System operational settings saved.');
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -309,14 +406,38 @@ export default function App() {
 
   const handleUpdateBlogger = async (cfg: BloggerConfig) => {
     try {
-      await apiClient.updateBloggerConfig(cfg);
-      setBloggerConfig(cfg);
+      const res = await apiClient.updateBloggerConfig(cfg);
+      setBloggerConfig(res.config);
       showToast('Blogger target configuration updated.');
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       showToast(msg, 'error');
     }
   };
+
+  // If in initial load, show clean Cybernetic loading screen (never a black screen!)
+  if (appState === 'INITIALIZING') {
+    return (
+      <div
+        id="app-initializing-screen"
+        className="min-h-screen bg-[#07090e] text-slate-100 flex flex-col items-center justify-center p-6 selection:bg-cyan-500"
+      >
+        <div className="cyber-panel p-8 rounded-2xl border border-slate-800 text-center max-w-sm w-full space-y-5 shadow-2xl bg-gradient-to-b from-slate-900/90 to-[#0b0f19]">
+          <div className="w-14 h-14 mx-auto rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 shadow-lg shadow-cyan-500/10">
+            <RefreshCw className="w-7 h-7 animate-spin" />
+          </div>
+          <div className="space-y-1.5">
+            <h2 className="text-base font-bold text-white font-display">Axiom Operations Engine</h2>
+            <p className="text-xs text-slate-400">Synchronizing pipeline telemetry & AI providers...</p>
+          </div>
+          <div className="w-full bg-slate-800/80 h-1.5 rounded-full overflow-hidden">
+            <div className="bg-gradient-to-r from-cyan-500 to-blue-500 h-full w-2/3 animate-pulse rounded-full" />
+          </div>
+          <p className="text-[11px] font-mono text-slate-500">Autonomous Content Architecture</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#07090e] text-slate-100 flex flex-col selection:bg-cyan-500 selection:text-white">
@@ -347,10 +468,33 @@ export default function App() {
         onOpenNetlifyGuide={() => setShowNetlifyGuide(true)}
       />
 
+      {/* Resilient Non-Blocking API Degradation Warning (Requirement 5 & 11) */}
+      {(apiErrors.providers || apiErrors.database) && (
+        <div className="max-w-7xl w-full mx-auto px-4 sm:px-6 pt-3">
+          <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-500/40 text-amber-300 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>
+                {apiErrors.providers && `⚠️ API providers could not be loaded. `}
+                {apiErrors.database && `Database synchronization notice: ${apiErrors.database} `}
+                The dashboard is fully operational with safe offline fallbacks.
+              </span>
+            </div>
+            <button
+              onClick={() => loadData()}
+              className="px-3 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 text-xs font-bold transition-colors cursor-pointer self-start sm:self-auto shrink-0 flex items-center gap-1.5"
+            >
+              <RefreshCw className="w-3 h-3" />
+              <span>Retry</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Navigation Sub-Bar */}
       <Navigation
         activeTab={activeTab}
-        onChangeTab={setActiveTab}
+        onChangeTab={handleNavigateTab}
         counts={{
           topics: topics.length,
           articles: articles.length,
@@ -373,12 +517,12 @@ export default function App() {
             isTriggering={isTriggering}
             onRunNow={() => handleRunNow()}
             onViewArticle={(art) => setSelectedArticle(art)}
-            onViewAllArticles={() => setActiveTab('articles')}
+            onViewAllArticles={() => handleNavigateTab('articles')}
           />
         )}
 
         {activeTab === 'pipeline' && (
-          <PipelineVisualizer currentJob={activeJob || jobs[0]} />
+          <PipelineVisualizer currentJob={activeJob || jobs[0] || null} />
         )}
 
         {activeTab === 'topics' && (
@@ -388,7 +532,7 @@ export default function App() {
             onScoutTopics={handleScoutTopics}
             onRunCycleForTopic={(topicId) => {
               handleRunNow(topicId);
-              setActiveTab('pipeline');
+              handleNavigateTab('pipeline');
             }}
           />
         )}
@@ -440,7 +584,7 @@ export default function App() {
           <SettingsView
             settings={settings}
             onUpdateSettings={handleUpdateSettings}
-            onNavigateToProviders={() => setActiveTab('providers')}
+            onNavigateToProviders={() => handleNavigateTab('providers')}
           />
         )}
       </main>

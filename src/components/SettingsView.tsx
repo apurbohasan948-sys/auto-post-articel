@@ -23,8 +23,49 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onUpdateSettings,
   onNavigateToProviders,
 }) => {
-  const [formData, setFormData] = useState<SystemSettings>(settings);
+  const [formData, setFormData] = useState<SystemSettings>(() => ({
+    status: settings?.status || 'IDLE',
+    mode: settings?.mode || 'AUTO',
+    language: settings?.language || 'English',
+    niche: settings?.niche || 'Autonomous AI Systems & Cloud Infrastructure',
+    contentNiche: settings?.contentNiche || settings?.niche || 'Autonomous AI Systems & Cloud Infrastructure',
+    subNiches: Array.isArray(settings?.subNiches) ? settings.subNiches : ['Multi-Agent Architecture', 'Serverless Cron', 'Empirical Research'],
+    targetAudience: settings?.targetAudience || 'Software Engineers, Architects, and Tech Leaders',
+    countryRegion: settings?.countryRegion || 'Global',
+    keywords: Array.isArray(settings?.keywords) ? settings.keywords : ['Autonomous AI', 'Agent Orchestration', 'Netlify Serverless'],
+    excludedKeywords: Array.isArray(settings?.excludedKeywords) ? settings.excludedKeywords : ['crypto pumps', 'get rich quick', 'unverified rumors'],
+    articleFrequencyPerDay: settings?.articleFrequencyPerDay || 3,
+    maxArticlesPerDay: settings?.maxArticlesPerDay || 3,
+    maxAiCallsPerDay: settings?.maxAiCallsPerDay || 60,
+    maxAICallsPerDay: settings?.maxAICallsPerDay || 60,
+    maxResearchCallsPerDay: settings?.maxResearchCallsPerDay || 20,
+    maxWebSearchesPerDay: settings?.maxWebSearchesPerDay || 20,
+    maxTokensPerArticle: settings?.maxTokensPerArticle || 4000,
+    maxRewriteAttempts: settings?.maxRewriteAttempts || 2,
+    timezone: settings?.timezone || 'UTC',
+    activeDays: Array.isArray(settings?.activeDays) ? settings.activeDays : ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'],
+    quietHoursStart: typeof settings?.quietHoursStart === 'number' ? settings.quietHoursStart : 23,
+    quietHoursEnd: typeof settings?.quietHoursEnd === 'number' ? settings.quietHoursEnd : 6,
+    todayStats: settings?.todayStats || {
+      aiCalls: 0,
+      researchCalls: 0,
+      articlesPublished: 0,
+      socialPostsCreated: 0,
+      date: new Date().toISOString().slice(0, 10),
+    },
+  }));
   const [isSaved, setIsSaved] = useState(false);
+
+  React.useEffect(() => {
+    if (settings) {
+      setFormData((prev) => ({
+        ...prev,
+        ...settings,
+        activeDays: Array.isArray(settings.activeDays) ? settings.activeDays : prev.activeDays,
+        todayStats: settings.todayStats || prev.todayStats,
+      }));
+    }
+  }, [settings]);
 
   const daysOfWeek = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 

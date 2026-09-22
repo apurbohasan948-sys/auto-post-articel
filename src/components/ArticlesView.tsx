@@ -18,19 +18,21 @@ interface ArticlesViewProps {
 }
 
 export const ArticlesView: React.FC<ArticlesViewProps> = ({
-  articles,
+  articles = [],
   onSelectArticle,
   onPublishArticle,
 }) => {
   const [filter, setFilter] = useState<'ALL' | 'APPROVED' | 'PUBLISHED' | 'DISTRIBUTED' | 'FAILED'>('ALL');
   const [search, setSearch] = useState('');
 
-  const filtered = articles.filter((a) => {
+  const safeArticles = Array.isArray(articles) ? articles : [];
+  const filtered = safeArticles.filter((a) => {
+    if (!a) return false;
     if (filter !== 'ALL' && a.lifecycleState !== filter) return false;
     if (
       search &&
-      !a.title.toLowerCase().includes(search.toLowerCase()) &&
-      !a.slug.toLowerCase().includes(search.toLowerCase())
+      !(a.title || '').toLowerCase().includes(search.toLowerCase()) &&
+      !(a.slug || '').toLowerCase().includes(search.toLowerCase())
     )
       return false;
     return true;
@@ -53,7 +55,7 @@ export const ArticlesView: React.FC<ArticlesViewProps> = ({
         </div>
 
         <div className="text-xs font-mono text-slate-400 bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-800">
-          Catalog Total: <span className="text-white font-bold">{articles.length}</span> articles
+          Catalog Total: <span className="text-white font-bold">{safeArticles.length}</span> articles
         </div>
       </div>
 

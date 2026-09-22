@@ -1,0 +1,12 @@
+# Netlify Redirects Configuration
+# Priority: API routes to Netlify Functions first (force rule), then SPA fallback to index.html
+
+/api/health              /.netlify/functions/health          200!
+/api/providers/test      /.netlify/functions/providers-test  200!
+/api/providers/ai/test   /.netlify/functions/providers-test  200!
+/api/search/test         /.netlify/functions/search-test     200!
+/api/providers/search/test /.netlify/functions/search-test   200!
+/api/*                   /.netlify/functions/api/:splat      200!
+
+# SPA Client Fallback:
+/*                       /index.html                         200

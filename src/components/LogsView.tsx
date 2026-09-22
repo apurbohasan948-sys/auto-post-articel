@@ -17,16 +17,18 @@ interface LogsViewProps {
   onRefresh: () => void;
 }
 
-export const LogsView: React.FC<LogsViewProps> = ({ logs, onRefresh }) => {
+export const LogsView: React.FC<LogsViewProps> = ({ logs = [], onRefresh }) => {
   const [levelFilter, setLevelFilter] = useState<string>('ALL');
   const [search, setSearch] = useState('');
 
-  const filtered = logs.filter((log) => {
+  const safeLogs = Array.isArray(logs) ? logs : [];
+  const filtered = safeLogs.filter((log) => {
+    if (!log) return false;
     if (levelFilter !== 'ALL' && log.level !== levelFilter) return false;
     if (
       search &&
-      !log.message.toLowerCase().includes(search.toLowerCase()) &&
-      !log.agentName.toLowerCase().includes(search.toLowerCase())
+      !(log.message || '').toLowerCase().includes(search.toLowerCase()) &&
+      !(log.agentName || '').toLowerCase().includes(search.toLowerCase())
     )
       return false;
     return true;

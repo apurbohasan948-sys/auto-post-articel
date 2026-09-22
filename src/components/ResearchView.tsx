@@ -16,8 +16,9 @@ interface ResearchViewProps {
   researchPackages: Record<string, ResearchPackage>;
 }
 
-export const ResearchView: React.FC<ResearchViewProps> = ({ researchPackages }) => {
-  const packageList = Object.values(researchPackages);
+export const ResearchView: React.FC<ResearchViewProps> = ({ researchPackages = {} }) => {
+  const safePackages = researchPackages && typeof researchPackages === 'object' ? researchPackages : {};
+  const packageList = Object.values(safePackages).filter(Boolean);
   const [selectedPackageId, setSelectedPackageId] = useState<string>(
     packageList[0]?.id || ''
   );
