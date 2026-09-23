@@ -200,16 +200,27 @@ export class ProviderTestingService {
         const ai = new GoogleGenAI({ apiKey: rawApiKey });
         const targetGeminiModel = modelName || 'gemini-2.5-flash';
 
-        const timeoutMs = Math.min(Math.max(provider.timeoutMs || 25000, 5000), 45000);
-        const controller = new AbortController();
+        // Maximum outbound provider timeout: strictly 8000ms to stay well below serverless platform timeout
+        const TEST_TIMEOUT_MS = 8000;
+        const timeoutMs = Math.min(
+          Math.max(Number(provider.timeoutMs) || 8000, 3000),
+          TEST_TIMEOUT_MS
+        );
+
+        let timeoutTimer: NodeJS.Timeout | undefined;
         let timedOut = false;
-        const timeoutTimer = setTimeout(() => {
-          timedOut = true;
-          controller.abort();
-        }, timeoutMs);
+
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutTimer = setTimeout(() => {
+            timedOut = true;
+            const err = new Error(`Provider request timed out after ${timeoutMs}ms`);
+            err.name = 'TimeoutError';
+            reject(err);
+          }, timeoutMs);
+        });
 
         try {
-          const response = await ai.models.generateContent({
+          const geminiPromise = ai.models.generateContent({
             model: targetGeminiModel,
             contents: prompt || 'Reply with OK',
             config: {
@@ -217,6 +228,8 @@ export class ProviderTestingService {
               temperature: 0.2,
             },
           });
+
+          const response = await Promise.race([geminiPromise, timeoutPromise]);
           clearTimeout(timeoutTimer);
 
           const latencyMs = Date.now() - startTime;
@@ -274,7 +287,7 @@ export class ProviderTestingService {
           let statusCode = 500;
           let errorType = 'gemini_error';
 
-          if (timedOut || (genErr instanceof Error && genErr.name === 'AbortError')) {
+          if (timedOut || (genErr instanceof Error && (genErr.name === 'TimeoutError' || genErr.name === 'AbortError'))) {
             statusCode = 504;
             errorType = 'timeout';
           } else if (errorMsg.includes('API_KEY_INVALID') || errorMsg.includes('API key not valid')) {
@@ -290,7 +303,7 @@ export class ProviderTestingService {
 
           const structuredError = {
             type: errorType,
-            message: errorMsg,
+            message: timedOut ? `Provider request timed out after ${timeoutMs}ms` : errorMsg,
             providerStatus: statusCode,
             providerResponse: errorMsg.substring(0, 250),
             url: 'Google GenAI SDK',
@@ -310,7 +323,7 @@ export class ProviderTestingService {
             timestamp: new Date().toISOString(),
           };
 
-          this.updateAIProviderStatus(provider.id, 'FAILED', latencyMs, errorMsg);
+          this.updateAIProviderStatus(provider.id, 'FAILED', latencyMs, structuredError.message);
           this.recordHistory({
             providerId: provider.id,
             providerName: provider.name,
@@ -319,16 +332,23 @@ export class ProviderTestingService {
             result: 'FAILED',
             latencyMs,
             httpStatus: statusCode,
-            error: errorMsg,
-            summary: `HTTP ${statusCode}: ${errorMsg.substring(0, 100)}`,
+            error: structuredError.message,
+            summary: `HTTP ${statusCode}: ${structuredError.message.substring(0, 100)}`,
           });
 
           return testResult;
+        } finally {
+          clearTimeout(timeoutTimer);
         }
       }
 
       // OpenAI-compatible / OpenRouter / Custom endpoints
-      const timeoutMs = Math.min(Math.max(provider.timeoutMs || 25000, 5000), 45000);
+      // Strict timeout for API connection testing: max 8000ms
+      const TEST_TIMEOUT_MS = 8000;
+      const timeoutMs = Math.min(
+        Math.max(Number(provider.timeoutMs) || 8000, 3000),
+        TEST_TIMEOUT_MS
+      );
       const controller = new AbortController();
       let timedOut = false;
       const timeoutTimer = setTimeout(() => {
@@ -443,6 +463,8 @@ export class ProviderTestingService {
         });
 
         return testResult;
+      } finally {
+        clearTimeout(timeoutTimer);
       }
 
       clearTimeout(timeoutTimer);
@@ -569,15 +591,9 @@ export class ProviderTestingService {
         };
       }
 
-      // Check OpenRouter account usage if openrouter
-      if (provider.type === 'openrouter') {
-        const extraUsage = await this.fetchOpenRouterUsage(rawApiKey);
-        if (extraUsage.hasUsageData) {
-          usageInfo = { ...usageInfo, ...extraUsage };
-        }
-      }
-
-      // Return normalized successful result
+      // Return normalized successful result immediately
+      // CRITICAL: Do NOT make secondary network requests (such as OpenRouter usage or credit lookups)
+      // during the connection test. The purpose of Test API is ONLY: key + endpoint + model + response.
       const testResult: AITestResult = {
         ok: true,
         success: true,
@@ -662,13 +678,17 @@ export class ProviderTestingService {
 
   /**
    * Fetches OpenRouter API key limits and credits if available.
+   * Standalone optional helper with strict 2500ms AbortController.
    */
   public async fetchOpenRouterUsage(apiKey: string): Promise<ProviderUsageInfo> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
     try {
       const res = await fetch('https://openrouter.ai/api/v1/auth/key', {
         headers: {
           Authorization: `Bearer ${apiKey}`,
         },
+        signal: controller.signal,
       });
       if (!res.ok) {
         return { hasUsageData: false, message: 'Usage information unavailable' };
@@ -689,6 +709,8 @@ export class ProviderTestingService {
       };
     } catch {
       return { hasUsageData: false, message: 'Usage information unavailable' };
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -753,8 +775,17 @@ export class ProviderTestingService {
       }
 
       const endpoint = normalizeTavilySearchUrl(provider.baseUrl);
+      const SEARCH_TIMEOUT_MS = 8000;
+      const timeoutMs = Math.min(
+        Math.max(Number(provider.timeoutMs) || 8000, 3000),
+        SEARCH_TIMEOUT_MS
+      );
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), provider.timeoutMs || 25000);
+      let timedOut = false;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs);
 
       try {
         const response = await fetch(endpoint, {

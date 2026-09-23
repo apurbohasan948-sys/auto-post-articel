@@ -68,12 +68,16 @@ export async function safeApiCall<T>(
 
     const trimmed = text.trim();
     if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html') || contentType.includes('text/html')) {
+      const errorMsg =
+        res.status === 504
+          ? 'Backend function timed out before completing the API test.'
+          : `Server returned an HTML page instead of API JSON (HTTP ${res.status})`;
       return {
         success: false,
         data: fallback as T,
         statusCode: res.status,
         isHtml: true,
-        error: `Server returned an HTML page instead of API JSON (HTTP ${res.status})`,
+        error: errorMsg,
       };
     }
 
@@ -585,20 +589,25 @@ export const apiClient = {
       }
       resultData = data;
     } else {
+      const is504 = res.statusCode === 504;
+      const errorMsg = is504
+        ? (res.isHtml ? 'Backend function timed out before completing the API test.' : (res.error || 'Provider request timed out after 8000ms'))
+        : (res.error || `HTTP request failed with status ${res.statusCode || 500}`);
+
       resultData = {
         ok: false,
         success: false,
         status: 'FAILED',
-        status_code: res.statusCode || 500,
+        status_code: res.statusCode || (is504 ? 504 : 500),
         latencyMs: 0,
         providerId: targetProvider?.id || params.providerId || 'unknown',
         provider: targetProvider?.name || 'Unknown',
         model: targetProvider?.modelName || targetProvider?.model || '',
-        error: res.error || `HTTP request failed with status ${res.statusCode || 500}`,
+        error: errorMsg,
         errorDetails: {
-          type: 'network_error',
-          message: res.error || `HTTP request failed with status ${res.statusCode || 500}`,
-          providerStatus: res.statusCode || 500,
+          type: is504 ? 'timeout' : 'network_error',
+          message: errorMsg,
+          providerStatus: res.statusCode || (is504 ? 504 : 500),
         },
         timestamp: new Date().toISOString(),
       };

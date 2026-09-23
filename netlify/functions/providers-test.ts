@@ -100,10 +100,41 @@ export const handler = async (event: any) => {
       }
     }
 
-    const testResult = await testingService.testAIProvider(
-      targetProvider,
-      prompt || 'Reply with OK'
-    );
+    // Function-level safety guard: return structured JSON before Netlify platform 10s limit
+    let functionTimer: NodeJS.Timeout | undefined;
+    const safetyTimeoutPromise = new Promise<any>((resolve) => {
+      functionTimer = setTimeout(() => {
+        resolve({
+          ok: false,
+          success: false,
+          status: 'FAILED',
+          status_code: 504,
+          error: {
+            type: 'timeout',
+            message: 'Provider test timed out after 9000ms',
+            providerStatus: 504,
+            url: targetProvider.baseUrl || '',
+          },
+          errorDetails: {
+            type: 'timeout',
+            message: 'Provider test timed out after 9000ms',
+            providerStatus: 504,
+            url: targetProvider.baseUrl || '',
+          },
+          provider: targetProvider.name || 'AI Provider',
+          model: targetProvider.modelName || targetProvider.defaultModel || 'unknown',
+          latencyMs: 9000,
+          latency_ms: 9000,
+          timestamp: new Date().toISOString(),
+        });
+      }, 9000);
+    });
+
+    const testResult = await Promise.race([
+      testingService.testAIProvider(targetProvider, prompt || 'Reply with OK'),
+      safetyTimeoutPromise,
+    ]);
+    clearTimeout(functionTimer);
 
     const httpStatus =
       typeof testResult.status_code === 'number'
