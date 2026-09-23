@@ -1,63 +1,94 @@
 import React from 'react';
-import { 
-  LayoutDashboard, 
-  Compass, 
-  BookOpen, 
-  FileText, 
-  Share2, 
-  TrendingUp, 
-  Terminal, 
-  Settings 
+import {
+  LayoutDashboard,
+  GitFork,
+  Compass,
+  FileText,
+  Search,
+  Share2,
+  Cpu,
+  Brain,
+  Terminal,
+  Settings,
+  Activity,
 } from 'lucide-react';
-import { NavigationTab } from '../types/agent';
+
+export type NavTab =
+  | 'dashboard'
+  | 'pipeline'
+  | 'topics'
+  | 'articles'
+  | 'research'
+  | 'publishing'
+  | 'providers'
+  | 'diagnostics'
+  | 'analytics'
+  | 'logs'
+  | 'settings';
 
 interface NavigationProps {
-  activeTab: NavigationTab;
-  onTabChange: (tab: NavigationTab) => void;
+  activeTab: NavTab;
+  onChangeTab: (tab: NavTab) => void;
+  counts: {
+    topics: number;
+    articles: number;
+    jobs: number;
+    logs: number;
+  };
 }
 
-interface NavItem {
-  id: NavigationTab;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-}
+export const Navigation: React.FC<NavigationProps> = ({ activeTab, onChangeTab, counts }) => {
+  const tabs = [
+    { id: 'dashboard' as NavTab, label: 'Dashboard', icon: LayoutDashboard },
+    { id: 'pipeline' as NavTab, label: '12-Agent Pipeline', icon: GitFork, badge: 'Live' },
+    { id: 'topics' as NavTab, label: 'Topic Scout', icon: Compass, count: counts.topics },
+    { id: 'articles' as NavTab, label: 'Articles & Review', icon: FileText, count: counts.articles },
+    { id: 'research' as NavTab, label: 'Tavily Research', icon: Search },
+    { id: 'publishing' as NavTab, label: 'Blogger & Social', icon: Share2 },
+    { id: 'providers' as NavTab, label: 'API Control Center', icon: Cpu },
+    { id: 'diagnostics' as NavTab, label: 'API Diagnostics', icon: Activity, badge: 'Probe' },
+    { id: 'analytics' as NavTab, label: 'Analytics & Memory', icon: Brain },
+    { id: 'logs' as NavTab, label: 'System Logs', icon: Terminal, count: counts.logs },
+    { id: 'settings' as NavTab, label: 'Settings', icon: Settings },
+  ];
 
-const NAV_ITEMS: NavItem[] = [
-  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { id: 'topics', label: 'Topics Scout', icon: Compass },
-  { id: 'research', label: 'Deep Research', icon: BookOpen },
-  { id: 'articles', label: 'Articles', icon: FileText },
-  { id: 'publishing', label: 'Publishing', icon: Share2 },
-  { id: 'analytics', label: 'Analytics', icon: TrendingUp },
-  { id: 'logs', label: 'Agent Logs', icon: Terminal },
-  { id: 'settings', label: 'Settings', icon: Settings },
-];
-
-export const Navigation: React.FC<NavigationProps> = ({ activeTab, onTabChange }) => {
   return (
-    <nav id="app-navigation" className="bg-slate-900/90 border-b border-slate-800 backdrop-blur-md sticky top-16 z-30">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex space-x-1 sm:space-x-2 overflow-x-auto py-2.5 scrollbar-none">
-          {NAV_ITEMS.map((item) => {
-            const Icon = item.icon;
-            const isActive = activeTab === item.id;
-            return (
-              <button
-                key={item.id}
-                id={`nav-tab-${item.id}`}
-                onClick={() => onTabChange(item.id)}
-                className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-all cursor-pointer ${
-                  isActive
-                    ? 'bg-blue-600/15 text-blue-400 border border-blue-500/30 font-semibold shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-                }`}
-              >
-                <Icon className={`w-4 h-4 ${isActive ? 'text-blue-400' : 'text-slate-400'}`} />
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
-        </div>
+    <nav className="border-b border-slate-800 bg-slate-900/60 px-4 sm:px-6 overflow-x-auto scrollbar-none">
+      <div className="max-w-7xl mx-auto flex items-center gap-1 py-1.5 min-w-max">
+        {tabs.map((tab) => {
+          const Icon = tab.icon;
+          const isActive = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => onChangeTab(tab.id)}
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap cursor-pointer ${
+                isActive
+                  ? 'bg-slate-800 text-cyan-400 shadow-sm border border-slate-700/80'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'
+              }`}
+            >
+              <Icon className={`w-4 h-4 ${isActive ? 'text-cyan-400' : 'text-slate-400'}`} />
+              <span>{tab.label}</span>
+
+              {tab.badge && (
+                <span className="ml-1 px-1.5 py-0.2 rounded text-[10px] font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+                  {tab.badge}
+                </span>
+              )}
+
+              {typeof tab.count === 'number' && tab.count > 0 && (
+                <span
+                  className={`ml-1 px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                    isActive ? 'bg-cyan-500/20 text-cyan-300' : 'bg-slate-800 text-slate-400'
+                  }`}
+                >
+                  {tab.count}
+                </span>
+              )}
+            </button>
+          );
+        })}
       </div>
     </nav>
   );

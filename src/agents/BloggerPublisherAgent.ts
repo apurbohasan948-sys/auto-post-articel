@@ -1,93 +1,87 @@
-import { BloggerAdapter, BloggerPublishResult } from '../adapters/BloggerAdapter';
-import { integrationStore } from '../services/integrationStore';
-import { appStorage } from '../services/storage';
-import { ArticleItem } from '../types/agent';
+/**
+ * Axiom Blogger Publisher Agent (Agent I)
+ * Executes the publishing workflow to Blogger after Quality Pass.
+ * Enforces manual approval checks or auto-publishing mode.
+ */
 
-export interface BloggerPublishReport {
-  attempted: number;
-  successful: number;
-  results: {
-    blogName: string;
-    blogId: string;
-    result: BloggerPublishResult;
-  }[];
-}
+import { BloggerService } from '../services/bloggerService.ts';
+import { StorageService } from '../services/storage.ts';
+import { Article } from '../types/agent.ts';
 
 export class BloggerPublisherAgent {
-  /**
-   * Reads enabled Blogger integrations dynamically from integrationStore.
-   * Publishes the article to each enabled blog.
-   */
-  public static async publish(article: ArticleItem): Promise<BloggerPublishReport> {
-    const enabledBlogs = integrationStore.getEnabledBlogger();
-    const report: BloggerPublishReport = {
-      attempted: enabledBlogs.length,
-      successful: 0,
-      results: []
-    };
+  private bloggerService: BloggerService;
+  private storage: StorageService;
 
-    if (enabledBlogs.length === 0) {
-      appStorage.addLog(
-        'BloggerPublisherAgent',
-        'warn',
-        'No enabled Blogger integrations found in integrationStore. Skipping Blogger publication.'
-      );
-      return report;
+  constructor() {
+    this.bloggerService = BloggerService.getInstance();
+    this.storage = StorageService.getInstance();
+  }
+
+  public async handlePublish(article: Article, isManualOverride = false, jobId?: string): Promise<Article> {
+    const settings = this.storage.getSettings();
+
+    // Check Quality Pass
+    if (article.qualityReport?.status !== 'PASS' && !isManualOverride) {
+      throw new Error(`Cannot publish article [${article.id}]: Quality status is ${article.qualityReport?.status || 'PENDING'}`);
     }
 
-    appStorage.addLog(
-      'BloggerPublisherAgent',
-      'info',
-      `Starting Blogger publication for article "${article.title}" across ${enabledBlogs.length} enabled blog(s).`
-    );
+    // Check Approval Mode
+    if (settings.mode === 'APPROVAL' && !isManualOverride) {
+      this.storage.addLog({
+        agentName: 'BloggerPublisherAgent',
+        level: 'INFO',
+        message: `Agent is in APPROVAL mode. Article [${article.id}] queued as APPROVED awaiting human sign-off.`,
+        jobId,
+      });
+      article.lifecycleState = 'APPROVED';
+      this.storage.saveArticle(article);
+      return article;
+    }
 
-    for (const blog of enabledBlogs) {
-      try {
-        const publishResult = await BloggerAdapter.publishPost(blog, {
+    this.storage.addLog({
+      agentName: 'BloggerPublisherAgent',
+      level: 'INFO',
+      message: `Executing Blogger deployment for "${article.title}"...`,
+      jobId,
+    });
+
+    try {
+      const pubResult = await this.bloggerService.publishPost(
+        {
           title: article.title,
-          content: article.content,
-          labels: article.tags,
-          isDraft: blog.defaultStatus === 'DRAFT'
-        });
+          contentHtml: article.bloggerHtml,
+          labels: [...article.focusKeywords.slice(0, 3), 'Axiom AI'],
+          topicId: article.topicId,
+          articleId: article.id,
+        },
+        jobId
+      );
 
-        report.results.push({
-          blogName: blog.name,
-          blogId: blog.blogId,
-          result: publishResult
-        });
+      article.bloggerPost = {
+        blogId: pubResult.blogId,
+        postId: pubResult.postId,
+        url: pubResult.url,
+        labels: [...article.focusKeywords.slice(0, 3)],
+        publishedAt: pubResult.publishedAt,
+        idempotencyHash: pubResult.idempotencyHash,
+      };
 
-        if (publishResult.success) {
-          report.successful++;
-          appStorage.addLog(
-            'BloggerPublisherAgent',
-            'success',
-            `Published "${article.title}" to blog "${blog.name}" (${blog.defaultStatus})`,
-            { url: publishResult.url }
-          );
+      article.lifecycleState = 'PUBLISHED';
+      this.storage.saveArticle(article);
 
-          // Update article publishedUrls
-          appStorage.updateArticle(article.id, {
-            publishedUrls: {
-              ...(article.publishedUrls || {}),
-              blogger: publishResult.url
-            }
-          });
-        } else {
-          appStorage.addLog(
-            'BloggerPublisherAgent',
-            'error',
-            `Failed publishing to "${blog.name}": ${publishResult.error}`
-          );
-        }
-      } catch (err: any) {
-        appStorage.addLog(
-          'BloggerPublisherAgent',
-          'error',
-          `Exception during Blogger publication for "${blog.name}": ${err?.message}`
-        );
-      }
+      settings.todayStats.articlesPublished += 1;
+      this.storage.updateSettings({ todayStats: settings.todayStats });
+
+      return article;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.storage.addLog({
+        agentName: 'BloggerPublisherAgent',
+        level: 'ERROR',
+        message: `Blogger publication failed: ${msg}. Article retained in APPROVED state.`,
+        jobId,
+      });
+      throw err;
     }
-
-    return report;
   }
 }

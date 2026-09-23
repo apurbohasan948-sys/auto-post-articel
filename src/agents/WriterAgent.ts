@@ -1,84 +1,107 @@
-import { AIProviderService } from '../services/aiProvider';
-import { appStorage } from '../services/storage';
-import { ArticleItem, ResearchData, TopicItem } from '../types/agent';
+/**
+ * Axiom Article Writer Agent (Agent E)
+ * Generates natural, authoritative, highly structured articles in English, Bengali, or Banglish.
+ * Synthesizes multiple sources, avoids hallucinations, and produces both Clean Markdown and Blogger-ready HTML.
+ */
+
+import { AIProviderManager } from '../services/aiProvider.ts';
+import { StorageService } from '../services/storage.ts';
+import { ContentPlan, ResearchPackage } from '../types/agent.ts';
+
+export interface WriterOutput {
+  cleanContent: string;
+  bloggerHtml: string;
+  wordCount: number;
+}
 
 export class WriterAgent {
-  public static async writeArticle(topic: TopicItem, research?: ResearchData): Promise<ArticleItem> {
-    appStorage.addLog('WriterAgent', 'info', `Drafting comprehensive article for "${topic.title}"...`);
+  private ai: AIProviderManager;
+  private storage: StorageService;
 
-    const prompt = `Write a comprehensive, publication-ready Markdown article titled: "${topic.title}".
-Keywords to naturally include: ${topic.keywords.join(', ')}.
-Target length: 450 - 650 words.
-Structure with:
-# Title
-Engaging intro paragraph.
-## 1. Key Concept & Industry Analysis
-Deep explanation with bullet points.
-## 2. Practical Implementation Guide
-Step-by-step guidance.
-## 3. Best Practices & Pitfalls to Avoid
-Actionable insights.
-## Conclusion & Strategic Takeaways
-Final thoughts.`;
+  constructor() {
+    this.ai = AIProviderManager.getInstance();
+    this.storage = StorageService.getInstance();
+  }
 
-    let generatedMarkdown = '';
-    try {
-      generatedMarkdown = await AIProviderService.generateText(prompt);
-    } catch (e) {
-      console.warn('WriterAgent generation fallback', e);
-    }
+  public async writeArticle(
+    plan: ContentPlan,
+    research: ResearchPackage,
+    corrections?: string[],
+    jobId?: string
+  ): Promise<WriterOutput> {
+    const settings = this.storage.getSettings();
 
-    if (!generatedMarkdown || generatedMarkdown.trim().length < 100) {
-      generatedMarkdown = `# ${topic.title}
+    const correctionBlock =
+      corrections && corrections.length > 0
+        ? `\n\nREVISION INSTRUCTIONS FROM FACT/QUALITY AUDITOR:\n${corrections.map((c, i) => `${i + 1}. ${c}`).join('\n')}\nYou MUST address every revision requirement above in this version.`
+        : '';
 
-Content distribution has entered an autonomous era. Today, the most resilient digital brands are moving beyond manual copy-pasting and single-platform dependencies, choosing instead to implement **unified publishing engines**.
+    const languageInstruction =
+      settings.language === 'Bengali'
+        ? 'Write the entire article in natural, standard Bengali (বাংলা). Maintain technical terminology accurately.'
+        : settings.language === 'Banglish'
+        ? 'Write in modern conversational Banglish (Bengali written with Latin script blended with English tech terms), standard in South Asian developer communities.'
+        : 'Write in clear, authoritative, engaging English with technical sophistication.';
 
-## 1. The Core Architecture
-To scale publication across Blogger and modern social media networks without losing consistency:
-- **Centralized Content Store:** Store canonical versions of every article, outline, and fact-check.
-- **Robust Platform Adapters:** Isolate API differences between Google Blogger (HTML/labels), Facebook (feed/links), Instagram (media containers), and YouTube/TikTok (video formats).
-- **Persistent Verification:** Ensure secrets remain masked and credentials survive browser reloads cleanly.
+    const systemPrompt = `You are the Axiom Writer Agent.
+Role: Senior Staff Technology Journalist and Systems Engineer.
+Language Mode: ${languageInstruction}
 
-## 2. Step-by-Step Implementation
-1. **Topic Discovery:** Use autonomous trend scouts to detect high-interest topics before saturation.
-2. **Fact Grounding:** Enrich each draft with citations and empirical references.
-3. **Syndication Queue:** Schedule staggered releases to optimize peak viewer time zones.
+Strict Mandates:
+1. Ground all claims in the provided empirical research package.
+2. DO NOT fabricate statistics, fake percentages, or imaginary companies.
+3. Incorporate multiple viewpoints and references from the research package.
+4. Avoid buzzword stuffing, excessive repetition, and robotic transitions.
+5. Create comprehensive coverage (1,000 - 1,800 words equivalent depth).
+6. Provide TWO outputs:
+   - "cleanContent": Clean markdown format with headers, lists, code blocks or tables if appropriate.
+   - "bloggerHtml": Blogger-compatible HTML with styled classes (<div class="axiom-article">, <h2>, <h3>, <blockquote>, <p>, <ul>, and <div class="faq-container">).`;
 
-## 3. Measurable ROI for Creators
-By eliminating manual repetitive publishing tasks, editorial teams can refocus on strategic narrative direction and high-value brand partnerships.
+    const userPrompt = `Draft the complete article based on this blueprint:
 
-## Conclusion
-With the right integrations and an unwavering focus on quality, automated publishing becomes a predictable engine for audience growth.`;
-    }
+CHOSEN TITLE: ${plan.chosenTitle}
+SLUG: ${plan.slug}
+OUTLINE: ${JSON.stringify(plan.h2H3Structure)}
+KEY FACTS: ${JSON.stringify(plan.importantFacts)}
+VERIFIED SOURCES: ${JSON.stringify(research.sources.map((s) => ({ title: s.title, url: s.url })))}
+RESEARCH SUMMARY: ${research.summary}
+FAQ PLAN: ${JSON.stringify(plan.faqQuestions)}${correctionBlock}
 
-    const words = generatedMarkdown.split(/\s+/).length;
-    const readingTime = Math.max(1, Math.ceil(words / 200));
+Return valid JSON:
+{
+  "cleanContent": "# Title\\n\\nComplete Markdown text...",
+  "bloggerHtml": "<div class=\\"axiom-article\\">...</div>",
+  "wordCount": 1350
+}`;
 
-    const article = appStorage.addArticle({
-      title: topic.title,
-      slug: topic.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''),
-      content: generatedMarkdown,
-      summary: `Comprehensive analysis on ${topic.title}, covering core architecture, implementation protocols, and creator best practices.`,
-      topicId: topic.id,
-      category: topic.niche,
-      tags: topic.keywords,
-      wordCount: words,
-      readingTimeMinutes: readingTime,
-      seoScore: 92,
-      factCheckScore: 95,
-      factCheckNotes: [
-        'All primary claims cross-referenced with authoritative digital marketing sources.',
-        'Heading structure adheres strictly to semantic H1/H2 hierarchy.',
-        'Keyword density maintained at a natural 1.8% frequency.'
-      ],
-      status: 'draft'
+    const res = await this.ai.executeStructuredCompletion<WriterOutput>(
+      {
+        systemPrompt,
+        userPrompt,
+        temperature: 0.35,
+        maxTokens: 3800,
+      },
+      jobId
+    );
+
+    const output: WriterOutput = {
+      cleanContent: res.data.cleanContent || `# ${plan.chosenTitle}\n\n${research.summary}`,
+      bloggerHtml:
+        res.data.bloggerHtml ||
+        `<div class="axiom-article"><h1>${plan.chosenTitle}</h1><p>${research.summary}</p></div>`,
+      wordCount:
+        typeof res.data.wordCount === 'number'
+          ? res.data.wordCount
+          : (res.data.cleanContent || '').split(/\s+/).length,
+    };
+
+    this.storage.addLog({
+      agentName: 'WriterAgent',
+      level: 'SUCCESS',
+      message: `Article drafted successfully (${output.wordCount} words) in ${settings.language}. Generated both Markdown and Blogger HTML.`,
+      jobId,
     });
 
-    appStorage.addLog(
-      'WriterAgent',
-      'success',
-      `Article drafted successfully (${words} words, ~${readingTime} min read).`
-    );
-    return article;
+    return output;
   }
 }

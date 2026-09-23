@@ -1,131 +1,264 @@
-import { GoogleGenAI } from '@google/genai';
-import { providerStore } from './providerStore';
+/**
+ * Axiom AI Provider Manager
+ * Supports OpenRouter, Gemini (via @google/genai), and custom OpenAI-compatible endpoints.
+ * Implements fallback chains, exponential backoff, rate limits, and structured JSON parsing.
+ */
 
-export interface GenerationOptions {
-  systemPrompt?: string;
-  temperature?: number;
+import { GoogleGenAI } from '@google/genai';
+import { AIProviderConfig } from '../types/agent.ts';
+import { decryptSecret } from './encryption.ts';
+import { StorageService } from './storage.ts';
+
+export interface PromptPayload {
+  systemPrompt: string;
+  userPrompt: string;
+  responseSchemaName?: string;
   maxTokens?: number;
+  temperature?: number;
 }
 
-export class AIProviderService {
-  /**
-   * Generates text content using the currently active provider in providerStore.
-   */
-  public static async generateText(prompt: string, options: GenerationOptions = {}): Promise<string> {
-    const activeProvider = providerStore.getActiveProvider();
+export class AIProviderManager {
+  private static instance: AIProviderManager;
+  private storage: StorageService;
+  private geminiClient: GoogleGenAI | null = null;
 
-    // Check if Gemini is active and key is provided
-    if (activeProvider?.type === 'gemini' && activeProvider.apiKey) {
-      try {
-        const ai = new GoogleGenAI({ apiKey: activeProvider.apiKey });
-        const response = await ai.models.generateContent({
-          model: activeProvider.model || 'gemini-2.5-flash',
-          contents: prompt,
-          config: {
-            systemInstruction: options.systemPrompt,
-            temperature: options.temperature || 0.7
-          }
-        });
-        if (response?.text) {
-          return response.text;
-        }
-      } catch (err: any) {
-        console.warn('Gemini API call failed, falling back to smart synthesizer', err?.message);
-      }
-    }
-
-    // OpenAI direct call if configured
-    if (activeProvider?.type === 'openai' && activeProvider.apiKey) {
-      try {
-        const res = await fetch('https://api.openai.com/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${activeProvider.apiKey}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            model: activeProvider.model || 'gpt-4o-mini',
-            messages: [
-              ...(options.systemPrompt ? [{ role: 'system', content: options.systemPrompt }] : []),
-              { role: 'user', content: prompt }
-            ],
-            temperature: options.temperature || 0.7
-          })
-        });
-        const data = await res.json();
-        if (data.choices?.[0]?.message?.content) {
-          return data.choices[0].message.content;
-        }
-      } catch (err) {
-        console.warn('OpenAI API call failed', err);
-      }
-    }
-
-    // Groq direct call if configured
-    if (activeProvider?.type === 'groq' && activeProvider.apiKey) {
-      try {
-        const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${activeProvider.apiKey}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            model: activeProvider.model || 'llama-3.3-70b-versatile',
-            messages: [
-              ...(options.systemPrompt ? [{ role: 'system', content: options.systemPrompt }] : []),
-              { role: 'user', content: prompt }
-            ]
-          })
-        });
-        const data = await res.json();
-        if (data.choices?.[0]?.message?.content) {
-          return data.choices[0].message.content;
-        }
-      } catch (err) {
-        console.warn('Groq API call failed', err);
-      }
-    }
-
-    // High quality intelligent procedural synthesis fallback
-    return this.synthesizeFallback(prompt);
+  private constructor() {
+    this.storage = StorageService.getInstance();
   }
 
-  private static synthesizeFallback(prompt: string): string {
-    const lower = prompt.toLowerCase();
-    if (lower.includes('topic') || lower.includes('niche')) {
-      return JSON.stringify([
-        {
-          title: 'The Rise of Agentic Automation in Content Creation',
-          niche: 'AI & Marketing',
-          score: 95,
-          searchVolume: '32,000 / mo',
-          competition: 'Low',
-          trendGrowth: '+142%',
-          keywords: ['agentic AI', 'automated workflows', 'content scale']
-        },
-        {
-          title: 'Direct API Syndication: From Google Blogger to Meta & TikTok',
-          niche: 'Digital Strategy',
-          score: 91,
-          searchVolume: '24,500 / mo',
-          competition: 'Medium',
-          trendGrowth: '+96%',
-          keywords: ['Blogger API', 'social media integration', 'cross-posting']
-        },
-        {
-          title: 'Mastering Tavily Grounded SEO Articles for 2026',
-          niche: 'SEO & Tech',
-          score: 89,
-          searchVolume: '18,200 / mo',
-          competition: 'Low',
-          trendGrowth: '+115%',
-          keywords: ['Tavily search', 'grounded AI', 'fact-checking articles']
-        }
-      ]);
+  public static getInstance(): AIProviderManager {
+    if (!AIProviderManager.instance) {
+      AIProviderManager.instance = new AIProviderManager();
+    }
+    return AIProviderManager.instance;
+  }
+
+  private getGemini(): GoogleGenAI {
+    if (!this.geminiClient) {
+      const apiKey = process.env.GEMINI_API_KEY || '';
+      this.geminiClient = new GoogleGenAI({ apiKey });
+    }
+    return this.geminiClient;
+  }
+
+  /**
+   * Executes structured JSON completion with multi-provider fallback.
+   */
+  public async executeStructuredCompletion<T>(
+    payload: PromptPayload,
+    jobId?: string
+  ): Promise<{ data: T; providerUsed: string; latencyMs: number }> {
+    const settings = this.storage.getSettings();
+
+    // 1. Cost & rate limit check
+    if (settings.todayStats.aiCalls >= settings.maxAiCallsPerDay) {
+      const err = `Daily AI call ceiling exceeded (${settings.todayStats.aiCalls}/${settings.maxAiCallsPerDay}). Pausing job to prevent unexpected billing.`;
+      this.storage.addLog({
+        agentName: 'AIProviderManager',
+        level: 'WARN',
+        message: err,
+        jobId,
+      });
+      throw new Error(err);
     }
 
-    return `Autonomous content generated for: "${prompt.slice(0, 100)}...". 
-This comprehensive guide provides tactical implementation details, verified citations, and step-by-step best practices.`;
+    const providers = this.storage
+      .getAIProviders()
+      .filter((p) => p.enabled)
+      .sort((a, b) => a.priority - b.priority);
+
+    if (providers.length === 0) {
+      throw new Error('No AI providers enabled or configured in system settings.');
+    }
+
+    const errors: string[] = [];
+
+    for (const provider of providers) {
+      const startTime = Date.now();
+      try {
+        this.storage.addLog({
+          agentName: 'AIProviderManager',
+          level: 'INFO',
+          message: `Attempting completion with [${provider.name}] (${provider.modelName})...`,
+          jobId,
+        });
+
+        let rawResponse: string;
+
+        if (provider.type === 'gemini') {
+          rawResponse = await this.callGemini(provider, payload);
+        } else if (provider.type === 'openrouter' || provider.type === 'openai-compatible' || provider.type === 'custom') {
+          rawResponse = await this.callOpenAICompatible(provider, payload);
+        } else {
+          throw new Error(`Unsupported provider type: ${provider.type}`);
+        }
+
+        // Increment today's stats
+        settings.todayStats.aiCalls += 1;
+        this.storage.updateSettings({ todayStats: settings.todayStats });
+
+        // Parse structured JSON cleanly
+        const parsed = this.cleanAndParseJSON<T>(rawResponse);
+        const latencyMs = Date.now() - startTime;
+
+        this.storage.addLog({
+          agentName: 'AIProviderManager',
+          level: 'SUCCESS',
+          message: `Completion succeeded via [${provider.name}] in ${latencyMs}ms.`,
+          jobId,
+        });
+
+        return {
+          data: parsed,
+          providerUsed: provider.name,
+          latencyMs,
+        };
+      } catch (err: unknown) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        errors.push(`[${provider.name}]: ${errorMsg}`);
+        this.storage.addLog({
+          agentName: 'AIProviderManager',
+          level: 'WARN',
+          message: `Provider [${provider.name}] failed: ${errorMsg}. Rolling to next fallback...`,
+          jobId,
+        });
+      }
+    }
+
+    // If all providers failed, check if we have built-in algorithmic generator as ultimate safety
+    throw new Error(`All configured AI providers failed: ${errors.join(' | ')}`);
+  }
+
+  private async callGemini(provider: AIProviderConfig, payload: PromptPayload): Promise<string> {
+    const rawApiKey = decryptSecret(provider.apiKey) || process.env.GEMINI_API_KEY;
+    if (!rawApiKey) {
+      throw new Error('Missing Gemini API Key. Provide it in AI Providers or GEMINI_API_KEY environment variable.');
+    }
+
+    const ai = this.getGemini();
+    const model = provider.modelName || 'gemini-3.8-flash';
+
+    const promptText = `${payload.systemPrompt}\n\nStrict Requirement: Return ONLY valid, raw JSON matching the required schema. Do NOT enclose in markdown backticks or commentary.\n\n${payload.userPrompt}`;
+
+    const response = await ai.models.generateContent({
+      model,
+      contents: promptText,
+      config: {
+        responseMimeType: 'application/json',
+        temperature: payload.temperature ?? 0.3,
+        maxOutputTokens: payload.maxTokens ?? 3500,
+      },
+    });
+
+    if (!response.text) {
+      throw new Error('Empty response received from Gemini.');
+    }
+
+    return response.text;
+  }
+
+  private async callOpenAICompatible(
+    provider: AIProviderConfig,
+    payload: PromptPayload
+  ): Promise<string> {
+    const rawApiKey = decryptSecret(provider.apiKey);
+    if (!rawApiKey) {
+      throw new Error(`Missing API Key for [${provider.name}]. Configure it in settings or environment.`);
+    }
+
+    const baseUrl = provider.baseUrl || (provider.type === 'openrouter' ? 'https://openrouter.ai/api/v1' : 'https://api.openai.com/v1');
+    const endpoint = `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
+
+    let attempt = 0;
+    let lastError: Error | null = null;
+
+    const maxRetries = provider.maxRetries ?? 2;
+
+    while (attempt < maxRetries) {
+      attempt++;
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), provider.timeoutMs || 45000);
+
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${rawApiKey}`,
+        };
+
+        if (provider.type === 'openrouter') {
+          headers['HTTP-Referer'] = 'https://axiom-content.app';
+          headers['X-Title'] = 'Axiom Autonomous Content Agent';
+        }
+
+        const body = JSON.stringify({
+          model: provider.modelName,
+          messages: [
+            {
+              role: 'system',
+              content: `${payload.systemPrompt}\n\nYou MUST respond with valid JSON ONLY. No preamble, no backticks, no explanations.`,
+            },
+            {
+              role: 'user',
+              content: payload.userPrompt,
+            },
+          ],
+          response_format: { type: 'json_object' },
+          temperature: payload.temperature ?? 0.3,
+          max_tokens: payload.maxTokens ?? 3500,
+        });
+
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers,
+          body,
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeout);
+
+        if (!res.ok) {
+          const errText = await res.text();
+          throw new Error(`HTTP ${res.status}: ${errText}`);
+        }
+
+        const json = await res.json();
+        const content = json.choices?.[0]?.message?.content;
+        if (!content) {
+          throw new Error('Received malformed response with no choices content.');
+        }
+
+        return content;
+      } catch (err: unknown) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        if (attempt < maxRetries) {
+          const delay = Math.pow(2, attempt) * 1000;
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
+    }
+
+    throw lastError || new Error(`Failed after ${maxRetries} attempts`);
+  }
+
+  private cleanAndParseJSON<T>(raw: string): T {
+    let clean = raw.trim();
+    if (clean.startsWith('```json')) {
+      clean = clean.replace(/^```json\s*/, '').replace(/```\s*$/, '');
+    } else if (clean.startsWith('```')) {
+      clean = clean.replace(/^```\s*/, '').replace(/```\s*$/, '');
+    }
+
+    try {
+      return JSON.parse(clean) as T;
+    } catch {
+      // Find outermost brace if there is surrounding commentary
+      const start = clean.indexOf('{');
+      const end = clean.lastIndexOf('}');
+      if (start >= 0 && end > start) {
+        const sliced = clean.slice(start, end + 1);
+        return JSON.parse(sliced) as T;
+      }
+      throw new Error(`Failed to parse structured JSON from LLM: ${clean.substring(0, 150)}...`);
+    }
   }
 }

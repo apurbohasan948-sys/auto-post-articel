@@ -1,51 +1,123 @@
-import { BloggerIntegration, SocialIntegration, SocialPlatform } from '../types/agent';
-import { isMasked, MASKED_SECRET } from './providerStore';
+/**
+ * Axiom Integrations Store
+ * Single Source of Truth for Blogger and Social Media Integrations in browser localStorage.
+ *
+ * Dedicated keys:
+ * - 'tara_blogger_integrations'
+ * - 'tara_social_integrations'
+ *
+ * Features:
+ * - Synchronous write + immediate read-back verification
+ * - Resilient JSON parsing (no black screen or React crash)
+ * - Visual masking ('••••') secret field preservation
+ * - Multi-tab real-time sync via browser 'storage' event
+ * - In-memory fallback if localStorage is unavailable
+ */
 
-export const BLOGGER_KEY = 'tara_blogger_integrations';
-export const SOCIAL_KEY = 'tara_social_integrations';
+import {
+  BloggerIntegration,
+  IntegrationTestResult,
+  SocialIntegration,
+  SocialPlatform,
+} from '../types/integrations.ts';
 
-type StoreSubscriber = () => void;
+export const BLOGGER_INTEGRATIONS_KEY = 'tara_blogger_integrations';
+export const SOCIAL_INTEGRATIONS_KEY = 'tara_social_integrations';
 
-class IntegrationStore {
-  private subscribers: Set<StoreSubscriber> = new Set();
+type BloggerSubscriber = (integrations: BloggerIntegration[]) => void;
+type SocialSubscriber = (integrations: SocialIntegration[]) => void;
+type ErrorSubscriber = (error: string) => void;
 
-  constructor() {
-    if (typeof window !== 'undefined') {
-      window.addEventListener('storage', (e) => {
-        if (e.key === BLOGGER_KEY || e.key === SOCIAL_KEY) {
-          this.notifySubscribers();
-        }
-      });
-      window.addEventListener('tara_integration_update', () => {
-        this.notifySubscribers();
-      });
+function hasMask(val: any): boolean {
+  return typeof val === 'string' && val.includes('••••');
+}
+
+export class IntegrationStoreService {
+  private static instance: IntegrationStoreService;
+  private memoryBlogger: BloggerIntegration[] | null = null;
+  private memorySocial: SocialIntegration[] | null = null;
+  private bloggerSubscribers: Set<BloggerSubscriber> = new Set();
+  private socialSubscribers: Set<SocialSubscriber> = new Set();
+  private errorSubscribers: Set<ErrorSubscriber> = new Set();
+  private isStorageListening = false;
+
+  private constructor() {
+    this.initStorageListener();
+  }
+
+  public static getInstance(): IntegrationStoreService {
+    if (!IntegrationStoreService.instance) {
+      IntegrationStoreService.instance = new IntegrationStoreService();
+    }
+    return IntegrationStoreService.instance;
+  }
+
+  /**
+   * Safe check for localStorage availability.
+   */
+  private isStorageAvailable(): boolean {
+    if (typeof window === 'undefined' || !window.localStorage) {
+      return false;
+    }
+    try {
+      const testKey = '__axiom_integ_test__';
+      window.localStorage.setItem(testKey, '1');
+      window.localStorage.removeItem(testKey);
+      return true;
+    } catch {
+      return false;
     }
   }
 
-  public subscribe(callback: StoreSubscriber): () => void {
-    this.subscribers.add(callback);
-    return () => {
-      this.subscribers.delete(callback);
-    };
+  /**
+   * Multi-tab real-time synchronization listener.
+   */
+  private initStorageListener(): void {
+    if (this.isStorageListening || typeof window === 'undefined') return;
+    try {
+      window.addEventListener('storage', (event: StorageEvent) => {
+        if (event.key === BLOGGER_INTEGRATIONS_KEY) {
+          const fresh = this.loadBlogger();
+          this.notifyBlogger(fresh);
+        } else if (event.key === SOCIAL_INTEGRATIONS_KEY) {
+          const fresh = this.loadSocial();
+          this.notifySocial(fresh);
+        }
+      });
+      this.isStorageListening = true;
+    } catch (err) {
+      console.warn('[IntegrationStore] Failed to bind storage listener:', err);
+    }
   }
 
-  private notifySubscribers() {
-    this.subscribers.forEach((cb) => {
+  private notifyBlogger(items: BloggerIntegration[]): void {
+    this.bloggerSubscribers.forEach((cb) => {
       try {
-        cb();
+        cb(items);
       } catch (err) {
-        console.error('Error in integrationStore subscriber', err);
+        console.error('[IntegrationStore] Subscriber error in Blogger notification:', err);
       }
     });
   }
 
-  private emitUpdate(key: string) {
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(
-        new CustomEvent('tara_integration_update', { detail: { key } })
-      );
-    }
-    this.notifySubscribers();
+  private notifySocial(items: SocialIntegration[]): void {
+    this.socialSubscribers.forEach((cb) => {
+      try {
+        cb(items);
+      } catch (err) {
+        console.error('[IntegrationStore] Subscriber error in Social notification:', err);
+      }
+    });
+  }
+
+  private notifyError(message: string): void {
+    this.errorSubscribers.forEach((cb) => {
+      try {
+        cb(message);
+      } catch (err) {
+        console.error('[IntegrationStore] Subscriber error in error notification:', err);
+      }
+    });
   }
 
   // ==========================================
@@ -53,138 +125,136 @@ class IntegrationStore {
   // ==========================================
 
   public loadBlogger(): BloggerIntegration[] {
-    if (typeof window === 'undefined') return [];
+    if (!this.isStorageAvailable()) {
+      return this.memoryBlogger || [];
+    }
     try {
-      const raw = localStorage.getItem(BLOGGER_KEY);
-      if (!raw) return [];
+      const raw = window.localStorage.getItem(BLOGGER_INTEGRATIONS_KEY);
+      if (!raw) {
+        this.memoryBlogger = [];
+        return [];
+      }
       const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return [];
-      return parsed;
-    } catch (e) {
-      console.error('Safe recovery: corrupt Blogger localStorage, returning empty array', e);
+      if (Array.isArray(parsed)) {
+        const sanitized = parsed.filter((item): item is BloggerIntegration => {
+          return Boolean(item && typeof item === 'object' && typeof item.id === 'string');
+        });
+        this.memoryBlogger = sanitized;
+        return sanitized;
+      }
       return [];
+    } catch (err) {
+      console.warn('[IntegrationStore] Corrupt Blogger data in localStorage, using safe fallback:', err);
+      return this.memoryBlogger || [];
     }
   }
 
-  public saveBlogger(items: BloggerIntegration[], notify: boolean = true): void {
-    if (typeof window === 'undefined') return;
+  public saveBlogger(items: BloggerIntegration[]): boolean {
+    const sanitized = Array.isArray(items) ? items : [];
+    this.memoryBlogger = sanitized;
+
+    if (!this.isStorageAvailable()) {
+      this.notifyBlogger(sanitized);
+      return true;
+    }
+
     try {
-      const serialized = JSON.stringify(items);
-      localStorage.setItem(BLOGGER_KEY, serialized);
+      const json = JSON.stringify(sanitized);
+      window.localStorage.setItem(BLOGGER_INTEGRATIONS_KEY, json);
 
       // Synchronous read-back verification
-      const verified = localStorage.getItem(BLOGGER_KEY);
-      if (verified !== serialized) {
-        throw new Error('Read-back verification failed for tara_blogger_integrations');
+      const verify = window.localStorage.getItem(BLOGGER_INTEGRATIONS_KEY);
+      if (verify === null) {
+        throw new Error('Read-back verification failed: key was not stored in localStorage.');
+      }
+      const parsed = JSON.parse(verify);
+      if (!Array.isArray(parsed) || parsed.length !== sanitized.length) {
+        throw new Error('Read-back verification failed: items length mismatch.');
       }
 
-      if (notify) {
-        this.emitUpdate(BLOGGER_KEY);
-      }
-    } catch (e) {
-      console.error('Critical error writing Blogger integrations to localStorage', e);
-      throw e;
+      this.notifyBlogger(sanitized);
+      return true;
+    } catch (err: any) {
+      const msg = `Failed to save Blogger integrations to localStorage: ${err?.message || 'Storage Quota Exceeded'}`;
+      console.error('[IntegrationStore]', msg);
+      this.notifyError(msg);
+      this.notifyBlogger(sanitized);
+      return false;
     }
   }
 
-  public addBlogger(data: Omit<BloggerIntegration, 'id'>): BloggerIntegration {
-    const items = this.loadBlogger();
-    const id = `blogger-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-    const newEntry: BloggerIntegration = {
-      ...data,
-      id,
-      testStatus: data.testStatus || 'UNTESTED'
+  public addBlogger(config: Omit<BloggerIntegration, 'id'> & { id?: string }): BloggerIntegration {
+    const current = this.loadBlogger();
+    const newIntegration: BloggerIntegration = {
+      ...config,
+      id: config.id || `blogger_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      enabled: config.enabled ?? true,
+      defaultStatus: config.defaultStatus || 'DRAFT',
+      defaultLabel: config.defaultLabel || '',
+      lastTestStatus: 'NOT_CONFIGURED',
     };
-    items.push(newEntry);
-    this.saveBlogger(items);
-    return newEntry;
+    const updated = [...current, newIntegration];
+    this.saveBlogger(updated);
+    return newIntegration;
   }
 
-  public updateBlogger(id: string, updates: Partial<BloggerIntegration>): BloggerIntegration {
-    const items = this.loadBlogger();
-    const index = items.findIndex((b) => b.id === id);
-    if (index === -1) {
-      throw new Error(`Blogger integration with ID ${id} not found`);
-    }
+  public updateBlogger(id: string, updates: Partial<BloggerIntegration>): BloggerIntegration | null {
+    const current = this.loadBlogger();
+    const index = current.findIndex((b) => b.id === id);
+    if (index === -1) return null;
 
-    const existing = items[index];
-
-    // Masked secret protection for sensitive Blogger credentials
-    const cleanClientSecret = updates.clientSecret !== undefined
-      ? (isMasked(updates.clientSecret) || updates.clientSecret.trim() === '' ? existing.clientSecret : updates.clientSecret)
-      : existing.clientSecret;
-
-    const cleanAccessToken = updates.accessToken !== undefined
-      ? (isMasked(updates.accessToken) || updates.accessToken.trim() === '' ? existing.accessToken : updates.accessToken)
-      : existing.accessToken;
-
-    const cleanRefreshToken = updates.refreshToken !== undefined
-      ? (isMasked(updates.refreshToken) || updates.refreshToken.trim() === '' ? existing.refreshToken : updates.refreshToken)
-      : existing.refreshToken;
-
-    const updated: BloggerIntegration = {
+    const existing = current[index];
+    // Secret field protection: preserve un-modified masked credentials
+    const updatedItem: BloggerIntegration = {
       ...existing,
       ...updates,
-      clientSecret: cleanClientSecret,
-      accessToken: cleanAccessToken,
-      refreshToken: cleanRefreshToken
+      id: existing.id,
+      clientSecret: hasMask(updates.clientSecret) ? existing.clientSecret : (updates.clientSecret ?? existing.clientSecret),
+      accessToken: hasMask(updates.accessToken) ? existing.accessToken : (updates.accessToken ?? existing.accessToken),
+      refreshToken: hasMask(updates.refreshToken) ? existing.refreshToken : (updates.refreshToken ?? existing.refreshToken),
     };
 
-    items[index] = updated;
-    this.saveBlogger(items);
-    return updated;
+    current[index] = updatedItem;
+    this.saveBlogger(current);
+    return updatedItem;
   }
 
-  public removeBlogger(id: string): void {
-    const items = this.loadBlogger();
-    const filtered = items.filter((b) => b.id !== id);
-    this.saveBlogger(filtered);
+  public removeBlogger(id: string): boolean {
+    const current = this.loadBlogger();
+    const filtered = current.filter((b) => b.id !== id);
+    if (filtered.length === current.length) return false;
+    return this.saveBlogger(filtered);
   }
 
-  public toggleBloggerEnabled(id: string, enabled?: boolean): BloggerIntegration {
-    const items = this.loadBlogger();
-    const index = items.findIndex((b) => b.id === id);
-    if (index === -1) {
-      throw new Error(`Blogger integration with ID ${id} not found`);
-    }
-    const current = items[index];
-    const newEnabled = enabled !== undefined ? enabled : !current.enabled;
-    const updated = { ...current, enabled: newEnabled };
-    items[index] = updated;
-    this.saveBlogger(items);
-    return updated;
+  public toggleBloggerEnabled(id: string, enabled?: boolean): boolean {
+    const current = this.loadBlogger();
+    const item = current.find((b) => b.id === id);
+    if (!item) return false;
+    const targetState = typeof enabled === 'boolean' ? enabled : !item.enabled;
+    this.updateBlogger(id, { enabled: targetState });
+    return true;
   }
 
   public getBloggerById(id: string): BloggerIntegration | undefined {
     return this.loadBlogger().find((b) => b.id === id);
   }
 
-  public getEnabledBlogger(): BloggerIntegration[] {
+  public getEnabledBloggers(): BloggerIntegration[] {
     return this.loadBlogger().filter((b) => b.enabled);
   }
 
-  public updateBloggerTestResult(
-    id: string, 
-    status: 'CONNECTED' | 'FAILED', 
-    diagnostics?: string, 
-    lastError?: string
-  ): BloggerIntegration {
-    const items = this.loadBlogger();
-    const index = items.findIndex((b) => b.id === id);
-    if (index === -1) throw new Error(`Blogger integration ${id} not found`);
+  public recordBloggerTestResult(id: string, result: IntegrationTestResult): void {
+    const current = this.loadBlogger();
+    const target = current.find((b) => b.id === id);
+    if (!target) return;
 
-    const existing = items[index];
-    // Notice: Test result updates DO NOT clear credentials or alter enabled status!
-    const updated: BloggerIntegration = {
-      ...existing,
-      testStatus: status,
-      lastTested: Date.now(),
-      diagnostics,
-      lastError: lastError || (status === 'CONNECTED' ? undefined : existing.lastError)
-    };
-    items[index] = updated;
-    this.saveBlogger(items);
-    return updated;
+    // Never modify, delete, or wipe credentials on failed test
+    target.lastTestedAt = new Date().toISOString();
+    target.lastTestStatus = result.status;
+    target.lastLatencyMs = result.latencyMs;
+    target.lastError = result.status === 'FAILED' ? (result.error || result.message) : undefined;
+
+    this.saveBlogger(current);
   }
 
   // ==========================================
@@ -192,149 +262,180 @@ class IntegrationStore {
   // ==========================================
 
   public loadSocial(): SocialIntegration[] {
-    if (typeof window === 'undefined') return [];
+    if (!this.isStorageAvailable()) {
+      return this.memorySocial || [];
+    }
     try {
-      const raw = localStorage.getItem(SOCIAL_KEY);
-      if (!raw) return [];
+      const raw = window.localStorage.getItem(SOCIAL_INTEGRATIONS_KEY);
+      if (!raw) {
+        this.memorySocial = [];
+        return [];
+      }
       const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return [];
-      return parsed;
-    } catch (e) {
-      console.error('Safe recovery: corrupt Social localStorage, returning empty array', e);
+      if (Array.isArray(parsed)) {
+        const sanitized = parsed.filter((item): item is SocialIntegration => {
+          return Boolean(
+            item &&
+            typeof item === 'object' &&
+            typeof item.id === 'string' &&
+            typeof item.platform === 'string'
+          );
+        });
+        this.memorySocial = sanitized;
+        return sanitized;
+      }
       return [];
+    } catch (err) {
+      console.warn('[IntegrationStore] Corrupt Social data in localStorage, using safe fallback:', err);
+      return this.memorySocial || [];
     }
   }
 
-  public saveSocial(items: SocialIntegration[], notify: boolean = true): void {
-    if (typeof window === 'undefined') return;
+  public saveSocial(items: SocialIntegration[]): boolean {
+    const sanitized = Array.isArray(items) ? items : [];
+    this.memorySocial = sanitized;
+
+    if (!this.isStorageAvailable()) {
+      this.notifySocial(sanitized);
+      return true;
+    }
+
     try {
-      const serialized = JSON.stringify(items);
-      localStorage.setItem(SOCIAL_KEY, serialized);
+      const json = JSON.stringify(sanitized);
+      window.localStorage.setItem(SOCIAL_INTEGRATIONS_KEY, json);
 
       // Synchronous read-back verification
-      const verified = localStorage.getItem(SOCIAL_KEY);
-      if (verified !== serialized) {
-        throw new Error('Read-back verification failed for tara_social_integrations');
+      const verify = window.localStorage.getItem(SOCIAL_INTEGRATIONS_KEY);
+      if (verify === null) {
+        throw new Error('Read-back verification failed: social integrations not stored.');
+      }
+      const parsed = JSON.parse(verify);
+      if (!Array.isArray(parsed) || parsed.length !== sanitized.length) {
+        throw new Error('Read-back verification failed: social items length mismatch.');
       }
 
-      if (notify) {
-        this.emitUpdate(SOCIAL_KEY);
-      }
-    } catch (e) {
-      console.error('Critical error writing Social integrations to localStorage', e);
-      throw e;
+      this.notifySocial(sanitized);
+      return true;
+    } catch (err: any) {
+      const msg = `Failed to save Social integrations to localStorage: ${err?.message || 'Storage Error'}`;
+      console.error('[IntegrationStore]', msg);
+      this.notifyError(msg);
+      this.notifySocial(sanitized);
+      return false;
     }
   }
 
-  public addSocial(data: Omit<SocialIntegration, 'id'>): SocialIntegration {
-    const items = this.loadSocial();
-    const id = `social-${data.platform}-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-    const newEntry: SocialIntegration = {
-      ...data,
-      id,
-      testStatus: data.testStatus || 'UNTESTED'
+  public addSocial(config: Omit<SocialIntegration, 'id'> & { id?: string }): SocialIntegration {
+    const current = this.loadSocial();
+    const newIntegration: SocialIntegration = {
+      ...config,
+      id: config.id || `soc_${config.platform}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      enabled: config.enabled ?? true,
+      credentials: config.credentials || {},
+      lastTestStatus: 'NOT_CONFIGURED',
     };
-    items.push(newEntry);
-    this.saveSocial(items);
-    return newEntry;
+    const updated = [...current, newIntegration];
+    this.saveSocial(updated);
+    return newIntegration;
   }
 
-  public updateSocial(id: string, updates: Partial<SocialIntegration>): SocialIntegration {
-    const items = this.loadSocial();
-    const index = items.findIndex((s) => s.id === id);
-    if (index === -1) {
-      throw new Error(`Social integration with ID ${id} not found`);
-    }
+  public updateSocial(id: string, updates: Partial<SocialIntegration>): SocialIntegration | null {
+    const current = this.loadSocial();
+    const index = current.findIndex((s) => s.id === id);
+    if (index === -1) return null;
 
-    const existing = items[index];
-    const newCredentials: Record<string, string> = { ...existing.credentials };
+    const existing = current[index];
+    const newCreds = updates.credentials || {};
+    const mergedCreds: Record<string, string> = { ...(existing.credentials || {}) };
 
-    // Masked secret protection for all credentials passed
-    if (updates.credentials) {
-      for (const [key, val] of Object.entries(updates.credentials)) {
-        if (isMasked(val) || val.trim() === '') {
-          // preserve existing secret
-          newCredentials[key] = existing.credentials[key] || '';
-        } else {
-          newCredentials[key] = val;
-        }
+    // Secret field protection for social credentials
+    for (const [key, val] of Object.entries(newCreds)) {
+      if (hasMask(val)) {
+        // preserve previous value
+        mergedCreds[key] = existing.credentials?.[key] || '';
+      } else {
+        mergedCreds[key] = val;
       }
     }
 
-    const updated: SocialIntegration = {
+    const updatedItem: SocialIntegration = {
       ...existing,
       ...updates,
-      credentials: newCredentials
+      id: existing.id,
+      credentials: mergedCreds,
     };
 
-    items[index] = updated;
-    this.saveSocial(items);
-    return updated;
+    current[index] = updatedItem;
+    this.saveSocial(current);
+    return updatedItem;
   }
 
-  public removeSocial(id: string): void {
-    const items = this.loadSocial();
-    const filtered = items.filter((s) => s.id !== id);
-    this.saveSocial(filtered);
+  public removeSocial(id: string): boolean {
+    const current = this.loadSocial();
+    const filtered = current.filter((s) => s.id !== id);
+    if (filtered.length === current.length) return false;
+    return this.saveSocial(filtered);
   }
 
-  public toggleSocialEnabled(id: string, enabled?: boolean): SocialIntegration {
-    const items = this.loadSocial();
-    const index = items.findIndex((s) => s.id === id);
-    if (index === -1) {
-      throw new Error(`Social integration with ID ${id} not found`);
-    }
-    const current = items[index];
-    const newEnabled = enabled !== undefined ? enabled : !current.enabled;
-    const updated = { ...current, enabled: newEnabled };
-    items[index] = updated;
-    this.saveSocial(items);
-    return updated;
+  public toggleSocialEnabled(id: string, enabled?: boolean): boolean {
+    const current = this.loadSocial();
+    const item = current.find((s) => s.id === id);
+    if (!item) return false;
+    const targetState = typeof enabled === 'boolean' ? enabled : !item.enabled;
+    this.updateSocial(id, { enabled: targetState });
+    return true;
   }
 
   public getSocialById(id: string): SocialIntegration | undefined {
     return this.loadSocial().find((s) => s.id === id);
   }
 
-  public getEnabledSocial(): SocialIntegration[] {
-    return this.loadSocial().filter((s) => s.enabled);
-  }
-
   public getSocialByPlatform(platform: SocialPlatform): SocialIntegration[] {
     return this.loadSocial().filter((s) => s.platform === platform);
   }
 
-  public updateSocialTestResult(
-    id: string, 
-    status: 'CONNECTED' | 'FAILED', 
-    diagnostics?: string, 
-    lastError?: string
-  ): SocialIntegration {
-    const items = this.loadSocial();
-    const index = items.findIndex((s) => s.id === id);
-    if (index === -1) throw new Error(`Social integration ${id} not found`);
-
-    const existing = items[index];
-    // Notice: Test result updates DO NOT clear credentials or alter enabled status!
-    const updated: SocialIntegration = {
-      ...existing,
-      testStatus: status,
-      lastTested: Date.now(),
-      diagnostics,
-      lastError: lastError || (status === 'CONNECTED' ? undefined : existing.lastError)
-    };
-    items[index] = updated;
-    this.saveSocial(items);
-    return updated;
+  public getEnabledSocial(): SocialIntegration[] {
+    return this.loadSocial().filter((s) => s.enabled);
   }
 
-  // Generic methods required by prompt spec: load(), save(), add(), update(), remove(), toggleEnabled(), getById()
-  public load(): { blogger: BloggerIntegration[]; social: SocialIntegration[] } {
-    return {
-      blogger: this.loadBlogger(),
-      social: this.loadSocial()
+  public recordSocialTestResult(id: string, result: IntegrationTestResult): void {
+    const current = this.loadSocial();
+    const target = current.find((s) => s.id === id);
+    if (!target) return;
+
+    // Never modify, delete, or wipe credentials on failed test
+    target.lastTestedAt = new Date().toISOString();
+    target.lastTestStatus = result.status;
+    target.lastLatencyMs = result.latencyMs;
+    target.lastError = result.status === 'FAILED' ? (result.error || result.message) : undefined;
+
+    this.saveSocial(current);
+  }
+
+  // ==========================================
+  // SUBSCRIPTIONS
+  // ==========================================
+
+  public subscribeBlogger(callback: BloggerSubscriber): () => void {
+    this.bloggerSubscribers.add(callback);
+    return () => {
+      this.bloggerSubscribers.delete(callback);
+    };
+  }
+
+  public subscribeSocial(callback: SocialSubscriber): () => void {
+    this.socialSubscribers.add(callback);
+    return () => {
+      this.socialSubscribers.delete(callback);
+    };
+  }
+
+  public onError(callback: ErrorSubscriber): () => void {
+    this.errorSubscribers.add(callback);
+    return () => {
+      this.errorSubscribers.delete(callback);
     };
   }
 }
 
-export const integrationStore = new IntegrationStore();
+export const integrationStore = IntegrationStoreService.getInstance();

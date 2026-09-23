@@ -1,129 +1,96 @@
-import { 
-  FacebookAdapter, 
-  InstagramAdapter, 
-  YouTubeAdapter, 
-  TikTokAdapter, 
-  AdapterPublishResult 
-} from '../adapters';
-import { integrationStore } from '../services/integrationStore';
-import { appStorage } from '../services/storage';
-import { ArticleItem } from '../types/agent';
+/**
+ * Axiom Social Distribution Agent (Agent J)
+ * Generates tailored platform-specific copy (Facebook, X, Telegram, LinkedIn, Threads)
+ * and coordinates multi-network distribution via SocialService.
+ */
 
-export interface SocialPublishReport {
-  attempted: number;
-  successful: number;
-  results: {
-    platform: string;
-    accountName: string;
-    result: AdapterPublishResult;
-  }[];
-}
+import { AIProviderManager } from '../services/aiProvider.ts';
+import { SocialService } from '../services/socialService.ts';
+import { StorageService } from '../services/storage.ts';
+import { Article, SocialPost } from '../types/agent.ts';
 
 export class SocialDistributionAgent {
-  /**
-   * Reads enabled Social integrations dynamically from integrationStore.
-   * Crafts tailored platform posts and distributes them using platform adapters.
-   */
-  public static async distribute(article: ArticleItem): Promise<SocialPublishReport> {
-    const enabledSocials = integrationStore.getEnabledSocial();
-    const report: SocialPublishReport = {
-      attempted: enabledSocials.length,
-      successful: 0,
-      results: []
+  private ai: AIProviderManager;
+  private socialService: SocialService;
+  private storage: StorageService;
+
+  constructor() {
+    this.ai = AIProviderManager.getInstance();
+    this.socialService = SocialService.getInstance();
+    this.storage = StorageService.getInstance();
+  }
+
+  public async distributeArticle(article: Article, jobId?: string): Promise<SocialPost[]> {
+    const articleUrl = article.bloggerPost?.url || `https://axiom-content.app/articles/${article.slug}`;
+
+    this.storage.addLog({
+      agentName: 'SocialDistributionAgent',
+      level: 'INFO',
+      message: `Synthesizing platform-specific copy for "${article.title}"`,
+      jobId,
+    });
+
+    // 1. Generate platform-specific posts with AI
+    const systemPrompt = `You are the Axiom Social Growth Agent.
+Create high-engagement, non-spammy snippets tailored to each specific network:
+- facebook: Conversational editorial post with emojis and question hook.
+- x: Punchy thread opener within 260 characters, provocative insight.
+- telegram: Clean markdown format with bullet highlights.
+- linkedin: Professional thought leadership tone, 2-3 paragraphs.
+- threads: Casual, snappy remark stimulating discussion.`;
+
+    const userPrompt = `Create copy for:
+TITLE: ${article.title}
+SUMMARY: ${article.metaDescription}
+URL: ${articleUrl}
+
+Return JSON:
+{
+  "facebook": "Text for Facebook...",
+  "x": "Text for X...",
+  "telegram": "Text for Telegram...",
+  "linkedin": "Text for LinkedIn...",
+  "threads": "Text for Threads..."
+}`;
+
+    let snippets: Record<string, string> = {
+      facebook: `${article.title}\n\nRead the full technical breakdown here: ${articleUrl}`,
+      x: `Deep-dive on ${article.title}:\n\n${articleUrl}`,
+      telegram: `⚡️ **NEW PUBLICATION**: ${article.title}\n\n${article.metaDescription}\n\n🔗 ${articleUrl}`,
+      linkedin: `We just published our latest research on ${article.title}. Here is what teams need to know: ${articleUrl}`,
+      threads: `${article.title}. Thoughts? ${articleUrl}`,
     };
 
-    if (enabledSocials.length === 0) {
-      appStorage.addLog(
-        'SocialDistributionAgent',
-        'warn',
-        'No enabled Social Media integrations found in integrationStore. Skipping social distribution.'
+    try {
+      const res = await this.ai.executeStructuredCompletion<Record<string, string>>(
+        { systemPrompt, userPrompt, temperature: 0.4 },
+        jobId
       );
-      return report;
+      if (res.data) {
+        snippets = { ...snippets, ...res.data };
+      }
+    } catch (err) {
+      console.warn('[SocialDistribution] AI copy generation failed, using fallback templates:', err);
     }
 
-    appStorage.addLog(
-      'SocialDistributionAgent',
-      'info',
-      `Starting social distribution for "${article.title}" to ${enabledSocials.length} enabled account(s).`
+    // 2. Dispatch across enabled adapters
+    const distributions = await this.socialService.distributeArticle(
+      article.id,
+      article.title,
+      articleUrl,
+      snippets,
+      jobId
     );
 
-    const publishedUrls = { ...(article.publishedUrls || {}) };
+    article.socialDistributions = distributions;
+    article.lifecycleState = 'DISTRIBUTED';
+    this.storage.saveArticle(article);
 
-    for (const social of enabledSocials) {
-      try {
-        let res: AdapterPublishResult = { success: false, error: 'Not executed' };
+    const settings = this.storage.getSettings();
+    const publishedCount = distributions.filter((d) => d.status === 'PUBLISHED').length;
+    settings.todayStats.socialPostsCreated += publishedCount;
+    this.storage.updateSettings({ todayStats: settings.todayStats });
 
-        if (social.platform === 'facebook') {
-          const message = `📢 New Article: ${article.title}\n\n${article.summary}\n\nRead more below:`;
-          res = await FacebookAdapter.publishPost(social, {
-            message,
-            link: article.publishedUrls?.blogger
-          });
-          if (res.success && res.url) {
-            publishedUrls.facebook = res.url;
-          }
-        } else if (social.platform === 'instagram') {
-          // Instagram requires media
-          const caption = `🔥 ${article.title}\n\n${article.summary}\n\nTags: ${article.tags.map(t => '#' + t.replace(/\s+/g, '')).join(' ')}`;
-          const sampleImage = 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=1200&q=80';
-          res = await InstagramAdapter.publishImage(social, {
-            caption,
-            imageUrl: sampleImage
-          });
-          if (res.success && res.url) {
-            publishedUrls.instagram = res.url;
-          }
-        } else if (social.platform === 'youtube') {
-          res = await YouTubeAdapter.publishVideo(social, {
-            title: article.title.slice(0, 95),
-            description: `${article.summary}\n\nOriginal post: ${article.publishedUrls?.blogger || ''}`,
-            videoUrl: 'https://example.com/assets/sample-video.mp4',
-            tags: article.tags
-          });
-          if (res.success && res.url) {
-            publishedUrls.youtube = res.url;
-          }
-        } else if (social.platform === 'tiktok') {
-          res = await TikTokAdapter.publishVideo(social, {
-            title: article.title.slice(0, 100),
-            videoUrl: 'https://example.com/assets/sample-tiktok.mp4'
-          });
-          if (res.success && res.url) {
-            publishedUrls.tiktok = res.url;
-          }
-        }
-
-        report.results.push({
-          platform: social.platform,
-          accountName: social.name,
-          result: res
-        });
-
-        if (res.success) {
-          report.successful++;
-          appStorage.addLog(
-            'SocialDistributionAgent',
-            'success',
-            `Successfully posted to ${social.platform} (${social.name})`,
-            { url: res.url }
-          );
-        } else {
-          appStorage.addLog(
-            'SocialDistributionAgent',
-            'error',
-            `Failed posting to ${social.platform} (${social.name}): ${res.error}`
-          );
-        }
-      } catch (err: any) {
-        appStorage.addLog(
-          'SocialDistributionAgent',
-          'error',
-          `Exception posting to ${social.platform} (${social.name}): ${err?.message}`
-        );
-      }
-    }
-
-    appStorage.updateArticle(article.id, { publishedUrls });
-    return report;
+    return distributions;
   }
 }

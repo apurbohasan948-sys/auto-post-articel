@@ -1,304 +1,192 @@
-import React, { useEffect, useState } from 'react';
-import { 
-  FileText, 
-  ExternalLink, 
-  Share2, 
-  Globe, 
-  CheckCircle2, 
-  RefreshCw, 
-  Eye, 
-  Edit3, 
-  Sparkles, 
-  Trash2,
-  Calendar,
-  Clock
+import React, { useState } from 'react';
+import {
+  FileText,
+  Send,
+  Share2,
+  ExternalLink,
+  ShieldCheck,
+  Search,
+  ArrowUpRight,
+  Filter,
 } from 'lucide-react';
-import { ArticleItem } from '../types/agent';
-import { appStorage } from '../services/storage';
-import { BloggerPublisherAgent } from '../agents/BloggerPublisherAgent';
-import { SocialDistributionAgent } from '../agents/SocialDistributionAgent';
-import { integrationStore } from '../services/integrationStore';
+import { Article } from '../types/agent.ts';
 
-export const ArticlesView: React.FC = () => {
-  const [articles, setArticles] = useState<ArticleItem[]>([]);
-  const [selectedArticle, setSelectedArticle] = useState<ArticleItem | null>(null);
-  const [publishingId, setPublishingId] = useState<string | null>(null);
-  const [publishMessage, setPublishMessage] = useState<string | null>(null);
+interface ArticlesViewProps {
+  articles: Article[];
+  onSelectArticle: (article: Article) => void;
+  onPublishArticle: (id: string) => void;
+}
 
-  const refreshArticles = () => {
-    const list = appStorage.getArticles();
-    setArticles(list);
-    if (list.length > 0 && !selectedArticle) {
-      setSelectedArticle(list[0]);
-    } else if (selectedArticle) {
-      const updated = list.find(a => a.id === selectedArticle.id);
-      if (updated) setSelectedArticle(updated);
-    }
-  };
+export const ArticlesView: React.FC<ArticlesViewProps> = ({
+  articles = [],
+  onSelectArticle,
+  onPublishArticle,
+}) => {
+  const [filter, setFilter] = useState<'ALL' | 'APPROVED' | 'PUBLISHED' | 'DISTRIBUTED' | 'FAILED'>('ALL');
+  const [search, setSearch] = useState('');
 
-  useEffect(() => {
-    refreshArticles();
-    const unsub = appStorage.subscribe(() => {
-      refreshArticles();
-    });
-    return unsub;
-  }, []);
-
-  const handlePublishBlogger = async (art: ArticleItem) => {
-    setPublishingId(art.id);
-    setPublishMessage(null);
-    try {
-      const res = await BloggerPublisherAgent.publish(art);
-      if (res.successful > 0) {
-        setPublishMessage(`Successfully published to ${res.successful} Blogger account(s)!`);
-      } else if (res.attempted === 0) {
-        setPublishMessage('No enabled Blogger accounts found in Settings -> Integrations -> Blogger.');
-      } else {
-        setPublishMessage('Failed to publish to Blogger. Check credentials in Settings.');
-      }
-    } catch (e: any) {
-      setPublishMessage(`Error: ${e?.message}`);
-    } finally {
-      setPublishingId(null);
-      refreshArticles();
-    }
-  };
-
-  const handleDistributeSocial = async (art: ArticleItem) => {
-    setPublishingId(art.id);
-    setPublishMessage(null);
-    try {
-      const res = await SocialDistributionAgent.distribute(art);
-      if (res.successful > 0) {
-        setPublishMessage(`Successfully distributed to ${res.successful} social account(s)!`);
-      } else if (res.attempted === 0) {
-        setPublishMessage('No enabled Social integrations found in Settings -> Integrations -> Social Media.');
-      } else {
-        setPublishMessage('Failed to distribute to social channels. Check API keys in Settings.');
-      }
-    } catch (e: any) {
-      setPublishMessage(`Error: ${e?.message}`);
-    } finally {
-      setPublishingId(null);
-      refreshArticles();
-    }
-  };
-
-  const handleDeleteArticle = (id: string, title: string) => {
-    if (window.confirm(`Delete article "${title}"?`)) {
-      appStorage.deleteArticle(id);
-      refreshArticles();
-    }
-  };
+  const safeArticles = Array.isArray(articles) ? articles : [];
+  const filtered = safeArticles.filter((a) => {
+    if (!a) return false;
+    if (filter !== 'ALL' && a.lifecycleState !== filter) return false;
+    if (
+      search &&
+      !(a.title || '').toLowerCase().includes(search.toLowerCase()) &&
+      !(a.slug || '').toLowerCase().includes(search.toLowerCase())
+    )
+      return false;
+    return true;
+  });
 
   return (
-    <div id="articles-view" className="space-y-6 pb-12">
-      {/* Top Bar */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-slate-900 border border-slate-800 rounded-2xl p-6">
+    <div className="space-y-5">
+      {/* Top Banner */}
+      <div className="cyber-panel p-5 rounded-xl border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h2 className="text-lg font-bold text-white tracking-tight flex items-center gap-2">
-            <FileText className="w-5 h-5 text-blue-400" />
-            <span>Autonomous Articles &amp; Content Library</span>
-          </h2>
+          <div className="flex items-center gap-2">
+            <FileText className="w-5 h-5 text-cyan-400" />
+            <h2 className="text-base font-bold text-white font-display">
+              Autonomous Article Management & Quality Audits
+            </h2>
+          </div>
           <p className="text-xs text-slate-400 mt-1">
-            Review AI-crafted drafts, factual audits, and trigger instant publishing to connected Blogger blogs and Social networks.
+            Review generated drafts, verify empirical claims, audit Blogger HTML payloads, and approve distributions.
           </p>
         </div>
-        <div className="text-xs text-slate-400">
-          Total: <span className="font-semibold text-white">{articles.length}</span> articles
+
+        <div className="text-xs font-mono text-slate-400 bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-800">
+          Catalog Total: <span className="text-white font-bold">{safeArticles.length}</span> articles
         </div>
       </div>
 
-      {publishMessage && (
-        <div className="p-3.5 bg-blue-500/10 border border-blue-500/30 rounded-xl text-xs text-blue-300 flex items-center justify-between">
-          <span>{publishMessage}</span>
-          <button onClick={() => setPublishMessage(null)} className="text-slate-400 hover:text-white">✕</button>
+      {/* Filter and Search Bar */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="flex items-center gap-1.5 bg-slate-900 p-1 rounded-lg border border-slate-800 text-xs overflow-x-auto">
+          {(['ALL', 'APPROVED', 'PUBLISHED', 'DISTRIBUTED', 'FAILED'] as const).map((f) => (
+            <button
+              key={f}
+              onClick={() => setFilter(f)}
+              className={`px-3 py-1 rounded-md font-semibold cursor-pointer transition-colors whitespace-nowrap ${
+                filter === f ? 'bg-slate-800 text-cyan-400' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              {f} ({f === 'ALL' ? articles.length : articles.filter((a) => a.lifecycleState === f).length})
+            </button>
+          ))}
         </div>
-      )}
 
-      {articles.length === 0 ? (
-        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-12 text-center">
-          <FileText className="w-12 h-12 text-slate-600 mx-auto mb-3" />
-          <h3 className="text-base font-semibold text-white">No articles generated yet</h3>
-          <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-            Launch the agent swarm pipeline from the top header to discover topics and author complete articles.
-          </p>
+        <div className="relative">
+          <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-2.5" />
+          <input
+            type="text"
+            placeholder="Search article titles or slugs..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-full sm:w-64 pl-8 pr-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
+          />
         </div>
-      ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          {/* Article List Sidebar */}
-          <div className="lg:col-span-4 space-y-3">
-            {articles.map((art) => {
-              const isSelected = selectedArticle?.id === art.id;
-              return (
-                <div
-                  key={art.id}
-                  id={`article-card-${art.id}`}
-                  onClick={() => setSelectedArticle(art)}
-                  className={`p-4 rounded-xl border text-left cursor-pointer transition-all ${
-                    isSelected
-                      ? 'bg-blue-600/15 border-blue-500/40 shadow-sm'
-                      : 'bg-slate-900 border-slate-800 hover:border-slate-700'
+      </div>
+
+      {/* Articles Table / Cards */}
+      <div className="space-y-3">
+        {filtered.map((art) => (
+          <div
+            key={art.id}
+            className="cyber-panel p-4 sm:p-5 rounded-xl border border-slate-800 hover:border-slate-700 transition-all flex flex-col md:flex-row md:items-center justify-between gap-4"
+          >
+            <div className="space-y-2 flex-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span
+                  className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold uppercase ${
+                    art.lifecycleState === 'PUBLISHED' || art.lifecycleState === 'DISTRIBUTED'
+                      ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                      : art.lifecycleState === 'APPROVED'
+                      ? 'bg-indigo-500/15 text-indigo-400 border border-indigo-500/30'
+                      : 'bg-rose-500/15 text-rose-400 border border-rose-500/30'
                   }`}
                 >
-                  <div className="flex items-center justify-between text-[11px] mb-1.5">
-                    <span className="font-semibold text-blue-400">{art.category}</span>
-                    <span className="text-slate-400">{art.wordCount} words</span>
-                  </div>
-                  <h4 className="font-bold text-sm text-white line-clamp-2 leading-snug">
-                    {art.title}
-                  </h4>
-                  <div className="flex items-center gap-2 mt-3 pt-2 border-t border-slate-800/80 text-[11px]">
-                    <span className={`px-2 py-0.5 rounded font-semibold uppercase tracking-wider ${
-                      art.status === 'published' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'
-                    }`}>
-                      {art.status}
-                    </span>
-                    <span className="text-slate-400">SEO: {art.seoScore}%</span>
-                    <span className="text-slate-400">Fact: {art.factCheckScore}%</span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Article Detail & Preview */}
-          <div className="lg:col-span-8">
-            {selectedArticle && (
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-6">
-                {/* Header & Syndication Triggers */}
-                <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 pb-6 border-b border-slate-800">
-                  <div>
-                    <div className="flex items-center gap-2 mb-1.5">
-                      <span className="px-2.5 py-0.5 rounded text-xs font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20">
-                        {selectedArticle.category}
-                      </span>
-                      <span className="text-xs text-slate-400">
-                        {selectedArticle.wordCount} words (~{selectedArticle.readingTimeMinutes} min read)
-                      </span>
-                    </div>
-                    <h2 className="text-xl font-bold text-white tracking-tight">
-                      {selectedArticle.title}
-                    </h2>
-                  </div>
-
-                  {/* Syndication Buttons */}
-                  <div className="flex flex-wrap items-center gap-2 shrink-0">
-                    <button
-                      id="publish-blogger-action-btn"
-                      onClick={() => handlePublishBlogger(selectedArticle)}
-                      disabled={publishingId === selectedArticle.id}
-                      className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer"
-                      title="Publish to enabled Blogger accounts"
-                    >
-                      <Globe className="w-3.5 h-3.5 text-blue-400" />
-                      <span>{publishingId === selectedArticle.id ? 'Publishing...' : 'Push to Blogger'}</span>
-                    </button>
-
-                    <button
-                      id="publish-social-action-btn"
-                      onClick={() => handleDistributeSocial(selectedArticle)}
-                      disabled={publishingId === selectedArticle.id}
-                      className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer"
-                      title="Distribute to Facebook, Instagram, YouTube, TikTok"
-                    >
-                      <Share2 className="w-3.5 h-3.5 text-purple-400" />
-                      <span>Syndicate Social</span>
-                    </button>
-
-                    <button
-                      onClick={() => handleDeleteArticle(selectedArticle.id, selectedArticle.title)}
-                      className="p-2 bg-slate-800 hover:bg-rose-950/60 hover:text-rose-400 text-slate-400 rounded-lg border border-slate-700 transition-colors cursor-pointer"
-                      title="Delete Article"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-
-                {/* Published URL Status (if syndicated) */}
-                {selectedArticle.publishedUrls && Object.keys(selectedArticle.publishedUrls).length > 0 && (
-                  <div className="p-3.5 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-xs space-y-1">
-                    <div className="font-semibold text-emerald-400 flex items-center gap-1.5">
-                      <CheckCircle2 className="w-4 h-4" />
-                      <span>Live Syndication Endpoints:</span>
-                    </div>
-                    <div className="flex flex-wrap gap-3 pt-1">
-                      {selectedArticle.publishedUrls.blogger && (
-                        <a
-                          href={selectedArticle.publishedUrls.blogger}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-blue-400 hover:underline flex items-center gap-1"
-                        >
-                          <span>Blogger Post</span>
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
-                      )}
-                      {selectedArticle.publishedUrls.facebook && (
-                        <a
-                          href={selectedArticle.publishedUrls.facebook}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-blue-400 hover:underline flex items-center gap-1"
-                        >
-                          <span>Facebook Post</span>
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
-                      )}
-                      {selectedArticle.publishedUrls.instagram && (
-                        <a
-                          href={selectedArticle.publishedUrls.instagram}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-purple-400 hover:underline flex items-center gap-1"
-                        >
-                          <span>Instagram Post</span>
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {/* Quality & Fact-Check Audit */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div className="p-4 bg-slate-800/60 border border-slate-700/80 rounded-xl">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs font-semibold text-slate-300">SEO Audit</span>
-                      <span className="text-xs font-bold text-emerald-400">{selectedArticle.seoScore}/100</span>
-                    </div>
-                    <div className="flex flex-wrap gap-1.5 mt-2">
-                      {selectedArticle.tags.map((t) => (
-                        <span key={t} className="px-2 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300 border border-slate-700">
-                          #{t}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="p-4 bg-slate-800/60 border border-slate-700/80 rounded-xl">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs font-semibold text-slate-300">Fact-Check Audit</span>
-                      <span className="text-xs font-bold text-emerald-400">{selectedArticle.factCheckScore}/100</span>
-                    </div>
-                    <ul className="text-[11px] text-slate-400 space-y-1 list-disc list-inside">
-                      {selectedArticle.factCheckNotes?.slice(0, 2).map((n, i) => (
-                        <li key={i}>{n}</li>
-                      ))}
-                    </ul>
-                  </div>
-                </div>
-
-                {/* Article Content Render */}
-                <div className="prose prose-invert max-w-none bg-slate-950/40 p-6 rounded-xl border border-slate-800/80 text-slate-200 text-sm leading-relaxed whitespace-pre-wrap font-sans">
-                  {selectedArticle.content}
-                </div>
+                  {art.lifecycleState}
+                </span>
+                <span className="text-slate-400 font-mono text-[11px]">
+                  {art.language}
+                </span>
+                <span className="text-slate-600">•</span>
+                <span className="text-slate-400 font-mono text-[11px]">
+                  {art.cleanContent.split(/\s+/).length} words
+                </span>
+                <span className="text-slate-600">•</span>
+                <span className="text-slate-500 font-mono text-[11px]">
+                  {new Date(art.createdAt).toLocaleDateString()}
+                </span>
               </div>
-            )}
+
+              <h3
+                onClick={() => onSelectArticle(art)}
+                className="text-base font-bold text-white hover:text-cyan-300 transition-colors cursor-pointer font-display leading-snug"
+              >
+                {art.title}
+              </h3>
+
+              <p className="text-xs text-slate-400 line-clamp-2 leading-relaxed">
+                {art.metaDescription}
+              </p>
+
+              <div className="flex flex-wrap items-center gap-3 pt-1 text-[11px] font-mono text-slate-400">
+                {art.qualityReport && (
+                  <span className="flex items-center gap-1 text-emerald-400">
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    Quality: {art.qualityReport.scoreBreakdown.factualConsistency}%
+                  </span>
+                )}
+                {art.bloggerPost?.url && (
+                  <a
+                    href={art.bloggerPost.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center gap-1 text-cyan-400 hover:underline"
+                  >
+                    <ExternalLink className="w-3 h-3" />
+                    Blogger Live
+                  </a>
+                )}
+                {art.socialDistributions && art.socialDistributions.length > 0 && (
+                  <span className="flex items-center gap-1 text-purple-400">
+                    <Share2 className="w-3.5 h-3.5" />
+                    {art.socialDistributions.filter((s) => s.status === 'PUBLISHED').length} Networks
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center gap-2 shrink-0 justify-end">
+              <button
+                onClick={() => onSelectArticle(art)}
+                className="px-3.5 py-2 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer flex items-center gap-1.5"
+              >
+                <span>Full Review</span>
+                <ArrowUpRight className="w-3.5 h-3.5 text-cyan-400" />
+              </button>
+
+              {art.lifecycleState === 'APPROVED' && (
+                <button
+                  onClick={() => onPublishArticle(art.id)}
+                  className="px-3.5 py-2 rounded-lg text-xs font-bold text-white bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 shadow-md transition-all cursor-pointer flex items-center gap-1.5"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>Publish</span>
+                </button>
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        ))}
+
+        {filtered.length === 0 && (
+          <div className="p-12 text-center rounded-xl bg-slate-900/40 border border-slate-800 text-slate-500 text-xs">
+            No articles match this criteria.
+          </div>
+        )}
+      </div>
     </div>
   );
 };
