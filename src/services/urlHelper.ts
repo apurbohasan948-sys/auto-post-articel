@@ -16,12 +16,63 @@
  * - Avoids duplicate /v1/v1 or duplicate /chat/completions
  */
 /**
+ * Normalizes OpenRouter URL to chat completions endpoint.
+ * Always resolves to https://openrouter.ai/api/v1/chat/completions unless an explicit custom proxy is configured.
+ */
+export function normalizeOpenRouterUrl(rawBaseUrl?: string): string {
+  let clean = (rawBaseUrl || '').trim();
+
+  if (
+    !clean ||
+    clean === 'https://openrouter.ai' ||
+    clean === 'https://openrouter.ai/' ||
+    clean === 'https://openrouter.ai/api' ||
+    clean === 'https://openrouter.ai/api/' ||
+    clean === 'https://openrouter.ai/api/v1' ||
+    clean === 'https://openrouter.ai/api/v1/' ||
+    clean === 'https://openrouter.ai/v1' ||
+    clean === 'https://openrouter.ai/v1/'
+  ) {
+    return 'https://openrouter.ai/api/v1/chat/completions';
+  }
+
+  // Remove duplicate slashes (except in protocol ://)
+  clean = clean.replace(/([^:]\/)\/+/g, '$1');
+  clean = clean.replace(/\/+$/, '');
+
+  if (clean.endsWith('/chat/completions')) {
+    return clean;
+  }
+  if (clean.endsWith('/chat')) {
+    return `${clean}/completions`;
+  }
+  if (clean.endsWith('/api/v1')) {
+    return `${clean}/chat/completions`;
+  }
+  if (clean.endsWith('/v1')) {
+    if (clean.includes('openrouter.ai')) {
+      return 'https://openrouter.ai/api/v1/chat/completions';
+    }
+    return `${clean}/chat/completions`;
+  }
+  if (clean.endsWith('/api')) {
+    return `${clean}/v1/chat/completions`;
+  }
+  if (clean.includes('openrouter.ai') && !clean.includes('/api/v1')) {
+    return 'https://openrouter.ai/api/v1/chat/completions';
+  }
+
+  return normalizeOpenAICompatibleUrl(clean);
+}
+
+/**
  * Normalizes OpenAI-compatible base URL to chat completions endpoint.
  * Handles:
  * - https://example.com/v1 -> https://example.com/v1/chat/completions
  * - https://example.com/v1/ -> https://example.com/v1/chat/completions
- * - https://example.com -> https://example.com/v1/chat/completions
  * - https://example.com/v1/chat/completions -> https://example.com/v1/chat/completions
+ * - https://example.com -> https://example.com/v1/chat/completions
+ * - https://example.com/ -> https://example.com/v1/chat/completions
  * - Avoids duplicate /v1/v1, /chat/completions/chat/completions, or //chat/completions
  */
 export function normalizeOpenAICompatibleUrl(rawBaseUrl?: string): string {
@@ -94,6 +145,17 @@ export function normalizeOpenAICompatibleUrl(rawBaseUrl?: string): string {
   }
 
   return `${clean}/chat/completions`;
+}
+
+/**
+ * Routes to the correct endpoint normalizer based on provider type.
+ */
+export function normalizeProviderEndpoint(providerType?: string, rawBaseUrl?: string): string {
+  const t = (providerType || '').toLowerCase().trim();
+  if (t === 'openrouter' || t.includes('openrouter')) {
+    return normalizeOpenRouterUrl(rawBaseUrl);
+  }
+  return normalizeOpenAICompatibleUrl(rawBaseUrl);
 }
 
 // Retain alias for backwards compatibility

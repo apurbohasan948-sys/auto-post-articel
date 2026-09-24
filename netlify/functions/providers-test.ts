@@ -100,34 +100,41 @@ export const handler = async (event: any) => {
       }
     }
 
-    // Function-level safety guard: return structured JSON before Netlify platform 10s limit
+    // Function-level safety guard: return structured JSON if execution exceeds 16000ms
     let functionTimer: NodeJS.Timeout | undefined;
     const safetyTimeoutPromise = new Promise<any>((resolve) => {
       functionTimer = setTimeout(() => {
+        const errorObj = {
+          type: 'network_timeout',
+          errorType: 'NETWORK_TIMEOUT',
+          message: 'The provider did not respond before the timeout.',
+          providerStatus: 504,
+          url: targetProvider.baseUrl || '',
+        };
         resolve({
           ok: false,
           success: false,
           status: 'FAILED',
           status_code: 504,
-          error: {
-            type: 'timeout',
-            message: 'Provider test timed out after 9000ms',
-            providerStatus: 504,
-            url: targetProvider.baseUrl || '',
-          },
-          errorDetails: {
-            type: 'timeout',
-            message: 'Provider test timed out after 9000ms',
-            providerStatus: 504,
-            url: targetProvider.baseUrl || '',
-          },
+          statusCode: 504,
+          errorType: 'NETWORK_TIMEOUT',
+          message: errorObj.message,
+          error: errorObj,
+          errorDetails: errorObj,
           provider: targetProvider.name || 'AI Provider',
           model: targetProvider.modelName || targetProvider.defaultModel || 'unknown',
-          latencyMs: 9000,
-          latency_ms: 9000,
+          latencyMs: 16000,
+          latency_ms: 16000,
+          diagnostics: {
+            providerType: targetProvider.type,
+            endpoint: targetProvider.baseUrl || '',
+            model: targetProvider.modelName || targetProvider.defaultModel || 'unknown',
+            apiKeyPresent: Boolean(targetProvider.apiKey && targetProvider.apiKey.length > 0),
+            elapsedMs: 16000,
+          },
           timestamp: new Date().toISOString(),
         });
-      }, 9000);
+      }, 16000);
     });
 
     const testResult = await Promise.race([

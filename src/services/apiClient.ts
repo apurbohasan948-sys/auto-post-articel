@@ -591,7 +591,7 @@ export const apiClient = {
     } else {
       const is504 = res.statusCode === 504;
       const errorMsg = is504
-        ? (res.isHtml ? 'Backend function timed out before completing the API test.' : (res.error || 'Provider request timed out after 8000ms'))
+        ? (res.isHtml ? 'Backend function timed out before completing the API test.' : (res.error || 'The provider did not respond before the timeout.'))
         : (res.error || `HTTP request failed with status ${res.statusCode || 500}`);
 
       resultData = {

@@ -309,6 +309,9 @@ export interface AITestResult {
   success: boolean;
   status: number | string;
   status_code?: number;
+  statusCode?: number;
+  errorType?: string;
+  diagnostics?: any;
   provider?: string;
   model?: string;
   latencyMs: number;
