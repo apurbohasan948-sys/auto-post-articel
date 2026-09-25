@@ -924,21 +924,281 @@ app.put('/api/blogger', (req: Request, res: Response) => {
 
 // Blogger OAuth Authorization Initiation
 app.get('/api/blogger/oauth/url', (req: Request, res: Response) => {
-  const clientId = process.env.BLOGGER_CLIENT_ID;
-  const redirectUri = process.env.BLOGGER_REDIRECT_URI || `${req.protocol}://${req.get('host')}/api/blogger/oauth/callback`;
+  res.setHeader('Content-Type', 'application/json');
+  const clientId = (req.query.clientId as string)?.trim() || process.env.BLOGGER_CLIENT_ID;
+  const redirectUri =
+    (req.query.redirectUri as string)?.trim() ||
+    process.env.BLOGGER_REDIRECT_URI ||
+    `${req.protocol}://${req.get('host')}/api/blogger/oauth/callback`;
+
   if (!clientId) {
     return res.status(400).json({
-      error: 'BLOGGER_CLIENT_ID not configured in environment variables.',
-      instructions: 'Add BLOGGER_CLIENT_ID and BLOGGER_CLIENT_SECRET to .env or Netlify settings.',
+      success: false,
+      error: 'Google OAuth Client ID is missing. Please configure BLOGGER_CLIENT_ID in your environment or enter it under Advanced Options.',
+      instructions: 'Add BLOGGER_CLIENT_ID and BLOGGER_CLIENT_SECRET to environment variables or settings.',
     });
   }
 
   const scope = encodeURIComponent('https://www.googleapis.com/auth/blogger');
-  const oauthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(
+  const state = req.query.state ? encodeURIComponent(req.query.state as string) : '';
+  const oauthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(
+    clientId
+  )}&redirect_uri=${encodeURIComponent(
     redirectUri
-  )}&response_type=code&scope=${scope}&access_type=offline&prompt=consent`;
+  )}&response_type=code&scope=${scope}&access_type=offline&prompt=consent${state ? `&state=${state}` : ''}`;
 
-  res.json({ url: oauthUrl });
+  return res.json({ success: true, url: oauthUrl, redirectUri });
+});
+
+function escapeOAuthHtml(str: string): string {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Blogger OAuth Callback (popup window destination)
+const handleBloggerOAuthCallback = async (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  const code = req.query.code as string;
+  const error = req.query.error as string;
+  const state = req.query.state as string;
+
+  if (error) {
+    return res.status(400).send(`
+      <!DOCTYPE html>
+      <html>
+        <head><title>Authorization Cancelled</title></head>
+        <body style="font-family:sans-serif;padding:32px;text-align:center;background:#0f172a;color:#f87171;">
+          <h2>Google Authorization Denied</h2>
+          <p>${escapeOAuthHtml(error)}</p>
+          <script>
+            if (window.opener) {
+              window.opener.postMessage({
+                type: 'BLOGGER_OAUTH_ERROR',
+                error: ${JSON.stringify(error)}
+              }, '*');
+              setTimeout(() => window.close(), 1500);
+            }
+          </script>
+        </body>
+      </html>
+    `);
+  }
+
+  if (!code) {
+    return res.status(400).send(`
+      <!DOCTYPE html>
+      <html>
+        <head><title>Authorization Code Missing</title></head>
+        <body style="font-family:sans-serif;padding:32px;text-align:center;background:#0f172a;color:#f87171;">
+          <h2>Authorization Code Missing</h2>
+          <p>Google did not return an authorization code.</p>
+          <script>
+            if (window.opener) {
+              window.opener.postMessage({
+                type: 'BLOGGER_OAUTH_ERROR',
+                error: 'No authorization code received from Google'
+              }, '*');
+              setTimeout(() => window.close(), 1500);
+            }
+          </script>
+        </body>
+      </html>
+    `);
+  }
+
+  let clientId = process.env.BLOGGER_CLIENT_ID;
+  let clientSecret = process.env.BLOGGER_CLIENT_SECRET;
+  let redirectUri =
+    process.env.BLOGGER_REDIRECT_URI || `${req.protocol}://${req.get('host')}/api/blogger/oauth/callback`;
+
+  if (state) {
+    try {
+      const decoded = JSON.parse(Buffer.from(state, 'base64').toString('utf-8'));
+      if (decoded.clientId) clientId = decoded.clientId;
+      if (decoded.clientSecret) clientSecret = decoded.clientSecret;
+      if (decoded.redirectUri) redirectUri = decoded.redirectUri;
+    } catch {
+      // not base64 json state
+    }
+  }
+
+  if (!clientId || !clientSecret) {
+    // Return code so frontend can exchange if credentials are held client-side
+    return res.send(`
+      <!DOCTYPE html>
+      <html>
+        <head><title>Google Authorization Received</title></head>
+        <body style="font-family:sans-serif;padding:32px;text-align:center;background:#0f172a;color:#38bdf8;">
+          <h2>Authorization Code Received</h2>
+          <p>Processing credentials in main window...</p>
+          <script>
+            if (window.opener) {
+              window.opener.postMessage({
+                type: 'BLOGGER_OAUTH_CODE',
+                payload: {
+                  code: ${JSON.stringify(code)},
+                  redirectUri: ${JSON.stringify(redirectUri)}
+                }
+              }, '*');
+              window.close();
+            }
+          </script>
+        </body>
+      </html>
+    `);
+  }
+
+  try {
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: redirectUri,
+        grant_type: 'authorization_code',
+      }).toString(),
+    });
+
+    const tokenData = await tokenRes.json();
+    if (!tokenRes.ok || tokenData.error) {
+      const errMsg = tokenData.error_description || tokenData.error || 'Token exchange failed';
+      return res.status(400).send(`
+        <!DOCTYPE html>
+        <html>
+          <head><title>Token Exchange Failed</title></head>
+          <body style="font-family:sans-serif;padding:32px;text-align:center;background:#0f172a;color:#f87171;">
+            <h2>Google Token Exchange Failed</h2>
+            <p>${escapeOAuthHtml(errMsg)}</p>
+            <script>
+              if (window.opener) {
+                window.opener.postMessage({
+                  type: 'BLOGGER_OAUTH_ERROR',
+                  error: ${JSON.stringify(errMsg)},
+                  details: ${JSON.stringify(tokenData)}
+                }, '*');
+                setTimeout(() => window.close(), 2500);
+              }
+            </script>
+          </body>
+        </html>
+      `);
+    }
+
+    return res.send(`
+      <!DOCTYPE html>
+      <html>
+        <head><title>Blogger Connected</title></head>
+        <body style="font-family:sans-serif;padding:32px;text-align:center;background:#0f172a;color:#4ade80;">
+          <h2>Google Authorization Successful!</h2>
+          <p>Associating Blogger credentials...</p>
+          <script>
+            if (window.opener) {
+              window.opener.postMessage({
+                type: 'BLOGGER_OAUTH_SUCCESS',
+                payload: {
+                  accessToken: ${JSON.stringify(tokenData.access_token)},
+                  refreshToken: ${JSON.stringify(tokenData.refresh_token || '')},
+                  expiresIn: ${JSON.stringify(tokenData.expires_in || 3600)},
+                  scope: ${JSON.stringify(tokenData.scope || '')}
+                }
+              }, '*');
+              window.close();
+            } else {
+              window.location.href = '/';
+            }
+          </script>
+        </body>
+      </html>
+    `);
+  } catch (exchangeErr: any) {
+    const errText = exchangeErr?.message || 'Network error during Google OAuth exchange';
+    return res.status(500).send(`
+      <!DOCTYPE html>
+      <html>
+        <head><title>OAuth Network Error</title></head>
+        <body style="font-family:sans-serif;padding:32px;text-align:center;background:#0f172a;color:#f87171;">
+          <h2>OAuth Connection Error</h2>
+          <p>${escapeOAuthHtml(errText)}</p>
+          <script>
+            if (window.opener) {
+              window.opener.postMessage({
+                type: 'BLOGGER_OAUTH_ERROR',
+                error: ${JSON.stringify(errText)}
+              }, '*');
+              setTimeout(() => window.close(), 2500);
+            }
+          </script>
+        </body>
+      </html>
+    `);
+  }
+};
+
+app.get(['/api/blogger/oauth/callback', '/api/blogger/oauth/callback/'], handleBloggerOAuthCallback);
+
+// Explicit OAuth token exchange endpoint
+app.post('/api/blogger/oauth/exchange', async (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const { code, redirectUri, clientId: customClientId, clientSecret: customClientSecret } = req.body || {};
+    if (!code) {
+      return res.status(400).json({ success: false, error: 'Authorization code is required' });
+    }
+
+    const clientId = customClientId?.trim() || process.env.BLOGGER_CLIENT_ID;
+    const clientSecret = customClientSecret?.trim() || process.env.BLOGGER_CLIENT_SECRET;
+    const targetRedirectUri =
+      redirectUri?.trim() ||
+      process.env.BLOGGER_REDIRECT_URI ||
+      `${req.protocol}://${req.get('host')}/api/blogger/oauth/callback`;
+
+    if (!clientId || !clientSecret) {
+      return res.status(400).json({
+        success: false,
+        error: 'BLOGGER_CLIENT_ID and BLOGGER_CLIENT_SECRET are required for token exchange.',
+      });
+    }
+
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: targetRedirectUri,
+        grant_type: 'authorization_code',
+      }).toString(),
+    });
+
+    const tokenData = await tokenRes.json();
+    if (!tokenRes.ok || tokenData.error) {
+      return res.status(400).json({
+        success: false,
+        error: tokenData.error_description || tokenData.error || 'Failed to exchange authorization code with Google',
+        details: tokenData,
+      });
+    }
+
+    return res.json({
+      success: true,
+      accessToken: tokenData.access_token,
+      refreshToken: tokenData.refresh_token,
+      expiresIn: tokenData.expires_in,
+      scope: tokenData.scope,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Server error during OAuth exchange',
+    });
+  }
 });
 
 // Universal proxy route for client adapters

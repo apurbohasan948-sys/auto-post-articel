@@ -118,18 +118,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
-  const handleConnectGoogleOAuth = async (blogger: BloggerIntegration) => {
-    try {
-      const res = await fetch('/api/blogger/oauth/url');
-      const data = await res.json();
-      if (data?.url) {
-        window.location.href = data.url;
-      } else {
-        alert('OAuth endpoint returned no authorization URL.');
-      }
-    } catch (err: any) {
-      alert('Failed to initiate Google OAuth: ' + (err?.message || 'Unknown error'));
-    }
+  const handleConnectGoogleOAuth = (blogger: BloggerIntegration) => {
+    setEditingBlogger(blogger);
+    setIsBloggerModalOpen(true);
   };
 
   const handleToggleSocial = (id: string) => {

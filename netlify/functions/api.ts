@@ -741,6 +741,197 @@ export const handler = async (event: any) => {
       return { statusCode: 200, headers, body: JSON.stringify({ success: true, settings: updated }) };
     }
 
+    // --- Blogger OAuth Routes for Netlify ---
+    if (path === '/blogger/oauth/url' && method === 'GET') {
+      const q = event.queryStringParameters || {};
+      const clientId = q.clientId?.trim() || process.env.BLOGGER_CLIENT_ID;
+      const host = event.headers?.host || event.headers?.Host || 'localhost';
+      const proto = event.headers?.['x-forwarded-proto'] || 'https';
+      const redirectUri =
+        q.redirectUri?.trim() ||
+        process.env.BLOGGER_REDIRECT_URI ||
+        `${proto}://${host}/api/blogger/oauth/callback`;
+
+      if (!clientId) {
+        return {
+          statusCode: 400,
+          headers,
+          body: JSON.stringify({
+            success: false,
+            error: 'Google OAuth Client ID is missing. Please configure BLOGGER_CLIENT_ID or specify under Advanced Options.',
+            instructions: 'Add BLOGGER_CLIENT_ID and BLOGGER_CLIENT_SECRET to environment variables or settings.',
+          }),
+        };
+      }
+
+      const scope = encodeURIComponent('https://www.googleapis.com/auth/blogger');
+      const state = q.state ? encodeURIComponent(q.state) : '';
+      const oauthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(
+        clientId
+      )}&redirect_uri=${encodeURIComponent(
+        redirectUri
+      )}&response_type=code&scope=${scope}&access_type=offline&prompt=consent${state ? `&state=${state}` : ''}`;
+
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({ success: true, url: oauthUrl, redirectUri }),
+      };
+    }
+
+    if ((path === '/blogger/oauth/callback' || path === '/blogger/oauth/callback/') && method === 'GET') {
+      const q = event.queryStringParameters || {};
+      const code = q.code;
+      const error = q.error;
+      const state = q.state;
+      const htmlHeaders = {
+        ...headers,
+        'Content-Type': 'text/html; charset=utf-8',
+      };
+
+      if (error) {
+        return {
+          statusCode: 400,
+          headers: htmlHeaders,
+          body: `<!DOCTYPE html><html><body style="font-family:sans-serif;background:#0f172a;color:#f87171;padding:24px;text-align:center;"><h2>Google Authorization Denied</h2><p>${error}</p><script>if(window.opener){window.opener.postMessage({type:'BLOGGER_OAUTH_ERROR',error:${JSON.stringify(error)}},'*');setTimeout(()=>window.close(),1500);}</script></body></html>`,
+        };
+      }
+
+      if (!code) {
+        return {
+          statusCode: 400,
+          headers: htmlHeaders,
+          body: `<!DOCTYPE html><html><body style="font-family:sans-serif;background:#0f172a;color:#f87171;padding:24px;text-align:center;"><h2>Authorization Code Missing</h2><script>if(window.opener){window.opener.postMessage({type:'BLOGGER_OAUTH_ERROR',error:'No authorization code received from Google'},'*');setTimeout(()=>window.close(),1500);}</script></body></html>`,
+        };
+      }
+
+      let clientId = process.env.BLOGGER_CLIENT_ID;
+      let clientSecret = process.env.BLOGGER_CLIENT_SECRET;
+      const host = event.headers?.host || event.headers?.Host || 'localhost';
+      const proto = event.headers?.['x-forwarded-proto'] || 'https';
+      let redirectUri = process.env.BLOGGER_REDIRECT_URI || `${proto}://${host}/api/blogger/oauth/callback`;
+
+      if (state) {
+        try {
+          const decoded = JSON.parse(Buffer.from(state, 'base64').toString('utf-8'));
+          if (decoded.clientId) clientId = decoded.clientId;
+          if (decoded.clientSecret) clientSecret = decoded.clientSecret;
+          if (decoded.redirectUri) redirectUri = decoded.redirectUri;
+        } catch {
+          // ignore
+        }
+      }
+
+      if (!clientId || !clientSecret) {
+        return {
+          statusCode: 200,
+          headers: htmlHeaders,
+          body: `<!DOCTYPE html><html><body style="font-family:sans-serif;background:#0f172a;color:#38bdf8;padding:24px;text-align:center;"><h2>Authorization Code Received</h2><script>if(window.opener){window.opener.postMessage({type:'BLOGGER_OAUTH_CODE',payload:{code:${JSON.stringify(code)},redirectUri:${JSON.stringify(redirectUri)}}},'*');window.close();}</script></body></html>`,
+        };
+      }
+
+      try {
+        const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            code,
+            client_id: clientId,
+            client_secret: clientSecret,
+            redirect_uri: redirectUri,
+            grant_type: 'authorization_code',
+          }).toString(),
+        });
+
+        const tokenData = await tokenRes.json();
+        if (!tokenRes.ok || tokenData.error) {
+          const errMsg = tokenData.error_description || tokenData.error || 'Token exchange failed';
+          return {
+            statusCode: 400,
+            headers: htmlHeaders,
+            body: `<!DOCTYPE html><html><body style="font-family:sans-serif;background:#0f172a;color:#f87171;padding:24px;text-align:center;"><h2>Google Token Exchange Failed</h2><p>${errMsg}</p><script>if(window.opener){window.opener.postMessage({type:'BLOGGER_OAUTH_ERROR',error:${JSON.stringify(errMsg)}},'*');setTimeout(()=>window.close(),2500);}</script></body></html>`,
+          };
+        }
+
+        return {
+          statusCode: 200,
+          headers: htmlHeaders,
+          body: `<!DOCTYPE html><html><body style="font-family:sans-serif;background:#0f172a;color:#4ade80;padding:24px;text-align:center;"><h2>Google Authorization Successful!</h2><script>if(window.opener){window.opener.postMessage({type:'BLOGGER_OAUTH_SUCCESS',payload:{accessToken:${JSON.stringify(tokenData.access_token)},refreshToken:${JSON.stringify(tokenData.refresh_token||'')},expiresIn:${JSON.stringify(tokenData.expires_in||3600)},scope:${JSON.stringify(tokenData.scope||'')}}},'*');window.close();}else{window.location.href='/';}</script></body></html>`,
+        };
+      } catch (exchangeErr: any) {
+        const errText = exchangeErr?.message || 'Network error during Google OAuth exchange';
+        return {
+          statusCode: 500,
+          headers: htmlHeaders,
+          body: `<!DOCTYPE html><html><body style="font-family:sans-serif;background:#0f172a;color:#f87171;padding:24px;text-align:center;"><h2>OAuth Network Error</h2><p>${errText}</p><script>if(window.opener){window.opener.postMessage({type:'BLOGGER_OAUTH_ERROR',error:${JSON.stringify(errText)}},'*');setTimeout(()=>window.close(),2500);}</script></body></html>`,
+        };
+      }
+    }
+
+    if (path === '/blogger/oauth/exchange' && method === 'POST') {
+      const { code, redirectUri, clientId: customClientId, clientSecret: customClientSecret } = body || {};
+      if (!code) {
+        return { statusCode: 400, headers, body: JSON.stringify({ success: false, error: 'Authorization code is required' }) };
+      }
+
+      const clientId = customClientId?.trim() || process.env.BLOGGER_CLIENT_ID;
+      const clientSecret = customClientSecret?.trim() || process.env.BLOGGER_CLIENT_SECRET;
+      const host = event.headers?.host || event.headers?.Host || 'localhost';
+      const proto = event.headers?.['x-forwarded-proto'] || 'https';
+      const targetRedirectUri =
+        redirectUri?.trim() ||
+        process.env.BLOGGER_REDIRECT_URI ||
+        `${proto}://${host}/api/blogger/oauth/callback`;
+
+      if (!clientId || !clientSecret) {
+        return {
+          statusCode: 400,
+          headers,
+          body: JSON.stringify({
+            success: false,
+            error: 'BLOGGER_CLIENT_ID and BLOGGER_CLIENT_SECRET are required for token exchange.',
+          }),
+        };
+      }
+
+      const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          code,
+          client_id: clientId,
+          client_secret: clientSecret,
+          redirect_uri: targetRedirectUri,
+          grant_type: 'authorization_code',
+        }).toString(),
+      });
+
+      const tokenData = await tokenRes.json();
+      if (!tokenRes.ok || tokenData.error) {
+        return {
+          statusCode: 400,
+          headers,
+          body: JSON.stringify({
+            success: false,
+            error: tokenData.error_description || tokenData.error || 'Failed to exchange authorization code with Google',
+            details: tokenData,
+          }),
+        };
+      }
+
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          success: true,
+          accessToken: tokenData.access_token,
+          refreshToken: tokenData.refresh_token,
+          expiresIn: tokenData.expires_in,
+          scope: tokenData.scope,
+        }),
+      };
+    }
+
     if (path === '/health' && method === 'GET') {
       const aiProviders = storage.getAIProviders();
       const searchProviders = storage.getSearchProviders();
