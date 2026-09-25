@@ -6,6 +6,8 @@
 
 import { SocialPost } from '../types/agent.ts';
 import { StorageService } from './storage.ts';
+import { integrationStore } from './integrationStore.ts';
+import { publishToSocialIntegration } from './adapters/index.ts';
 
 export interface SocialDistributionItem {
   platform: 'facebook' | 'telegram' | 'linkedin' | 'x' | 'threads';
@@ -31,6 +33,7 @@ export class SocialService {
 
   /**
    * Distributes formatted snippets across all connected platforms.
+   * Checks localStorage integrationStore first as the authoritative source.
    */
   public async distributeArticle(
     articleId: string,
@@ -40,6 +43,62 @@ export class SocialService {
     jobId?: string
   ): Promise<SocialPost[]> {
     const results: SocialPost[] = [];
+    const enabledIntegrations = integrationStore.getEnabledSocial();
+
+    // If integrations are configured in localStorage, use them as primary
+    if (enabledIntegrations.length > 0) {
+      for (const integration of enabledIntegrations) {
+        const platformKey = integration.platform === 'twitter' ? 'x' : integration.platform;
+        const content = snippets[platformKey] || snippets[integration.platform] || `${articleTitle}\n\nRead more: ${articleUrl}`;
+        const record: SocialPost = {
+          id: 'soc_' + Math.random().toString(36).substring(2, 9),
+          platform: (platformKey as any),
+          content,
+          status: 'PENDING',
+          retryCount: 0,
+          createdAt: new Date().toISOString(),
+        };
+
+        try {
+          const res = await publishToSocialIntegration(integration, {
+            title: articleTitle,
+            summary: content,
+            url: articleUrl,
+          });
+
+          if (res.status === 'success') {
+            record.status = 'PUBLISHED';
+            record.platformPostId = res.postId;
+            record.publishedUrl = res.postUrl;
+            record.publishedAt = new Date().toISOString();
+            this.storage.addLog({
+              agentName: 'SocialDistributionAgent',
+              level: 'SUCCESS',
+              message: `Dispatched to [${integration.name} (${integration.platform})]: ${res.postUrl || res.postId || 'Success'}`,
+              jobId,
+            });
+          } else {
+            record.status = 'FAILED';
+            record.errorMessage = res.errorMessage || 'Publishing failed';
+            this.storage.addLog({
+              agentName: 'SocialDistributionAgent',
+              level: 'WARN',
+              message: `Failed publishing to [${integration.name}]: ${res.errorMessage}`,
+              jobId,
+            });
+          }
+        } catch (err: any) {
+          record.status = 'FAILED';
+          record.errorMessage = err?.message || 'Publishing error';
+        }
+
+        results.push(record);
+      }
+
+      return results;
+    }
+
+    // Fallback to legacy environment configurations if no custom integrations are stored
     const platforms: Array<'facebook' | 'telegram' | 'linkedin' | 'x' | 'threads'> = [
       'telegram',
       'facebook',

@@ -16,6 +16,7 @@
 
 import {
   BloggerIntegration,
+  IntegrationSettings,
   IntegrationTestResult,
   SocialIntegration,
   SocialPlatform,
@@ -23,6 +24,8 @@ import {
 
 export const BLOGGER_INTEGRATIONS_KEY = 'tara_blogger_integrations';
 export const SOCIAL_INTEGRATIONS_KEY = 'tara_social_integrations';
+export const INTEGRATION_SETTINGS_KEY = 'tara_integration_settings';
+export const MASKED_SECRET_PLACEHOLDER = '••••••••';
 
 type BloggerSubscriber = (integrations: BloggerIntegration[]) => void;
 type SocialSubscriber = (integrations: SocialIntegration[]) => void;
@@ -410,6 +413,124 @@ export class IntegrationStoreService {
     target.lastError = result.status === 'FAILED' ? (result.error || result.message) : undefined;
 
     this.saveSocial(current);
+  }
+
+  // ==========================================
+  // GENERAL SETTINGS (tara_integration_settings)
+  // ==========================================
+
+  public getSettings(): IntegrationSettings {
+    const defaultSettings: IntegrationSettings = {
+      autoPublishToBlogger: true,
+      autoDistributeToSocial: true,
+      notifyOnPublishError: true,
+      testBeforePublishing: true,
+      defaultBloggerStatus: 'DRAFT',
+    };
+
+    if (!this.isStorageAvailable()) {
+      return defaultSettings;
+    }
+
+    try {
+      const raw = window.localStorage.getItem(INTEGRATION_SETTINGS_KEY);
+      if (!raw) return defaultSettings;
+      const parsed = JSON.parse(raw);
+      return { ...defaultSettings, ...(parsed || {}) };
+    } catch {
+      return defaultSettings;
+    }
+  }
+
+  public saveSettings(updates: Partial<IntegrationSettings>): IntegrationSettings {
+    const current = this.getSettings();
+    const merged = { ...current, ...updates };
+    if (this.isStorageAvailable()) {
+      try {
+        window.localStorage.setItem(INTEGRATION_SETTINGS_KEY, JSON.stringify(merged));
+      } catch (err: any) {
+        console.error('[IntegrationStore] Failed to save settings:', err);
+      }
+    }
+    return merged;
+  }
+
+  // ==========================================
+  // CONVENIENCE & UNIFIED ALIAS METHODS
+  // ==========================================
+
+  public getBloggers(): BloggerIntegration[] {
+    return this.loadBlogger();
+  }
+
+  public getSocials(): SocialIntegration[] {
+    return this.loadSocial();
+  }
+
+  public load(): { bloggers: BloggerIntegration[]; socials: SocialIntegration[]; settings: IntegrationSettings } {
+    return {
+      bloggers: this.loadBlogger(),
+      socials: this.loadSocial(),
+      settings: this.getSettings(),
+    };
+  }
+
+  public save(data: { bloggers?: BloggerIntegration[]; socials?: SocialIntegration[]; settings?: Partial<IntegrationSettings> }): void {
+    if (data.bloggers) this.saveBlogger(data.bloggers);
+    if (data.socials) this.saveSocial(data.socials);
+    if (data.settings) this.saveSettings(data.settings);
+  }
+
+  public add(type: 'blogger' | 'social', item: any): BloggerIntegration | SocialIntegration {
+    if (type === 'blogger') {
+      return this.addBlogger(item);
+    } else {
+      return this.addSocial(item);
+    }
+  }
+
+  public update(type: 'blogger' | 'social', id: string, updates: any): BloggerIntegration | SocialIntegration | null {
+    if (type === 'blogger') {
+      return this.updateBlogger(id, updates);
+    } else {
+      return this.updateSocial(id, updates);
+    }
+  }
+
+  public remove(type: 'blogger' | 'social', id: string): boolean {
+    if (type === 'blogger') {
+      return this.removeBlogger(id);
+    } else {
+      return this.removeSocial(id);
+    }
+  }
+
+  public getById(type: 'blogger' | 'social', id: string): BloggerIntegration | SocialIntegration | undefined {
+    if (type === 'blogger') {
+      return this.getBloggerById(id);
+    } else {
+      return this.getSocialById(id);
+    }
+  }
+
+  public getEnabled(type: 'blogger' | 'social'): (BloggerIntegration | SocialIntegration)[] {
+    if (type === 'blogger') {
+      return this.getEnabledBloggers();
+    } else {
+      return this.getEnabledSocial();
+    }
+  }
+
+  public toggleEnabled(type: 'blogger' | 'social', id: string, enabled?: boolean): boolean {
+    if (type === 'blogger') {
+      return this.toggleBloggerEnabled(id, enabled);
+    } else {
+      return this.toggleSocialEnabled(id, enabled);
+    }
+  }
+
+  public getByPlatform(platform: SocialPlatform): SocialIntegration[] {
+    return this.getSocialByPlatform(platform);
   }
 
   // ==========================================

@@ -941,6 +941,48 @@ app.get('/api/blogger/oauth/url', (req: Request, res: Response) => {
   res.json({ url: oauthUrl });
 });
 
+// Universal proxy route for client adapters
+app.post('/api/proxy', async (req: Request, res: Response) => {
+  try {
+    const { url, method = 'GET', headers = {}, body } = req.body || {};
+    if (!url) {
+      return res.status(400).json({ error: 'Missing target url in proxy request' });
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    const fetchOptions: RequestInit = {
+      method,
+      headers: { ...headers },
+      signal: controller.signal,
+    };
+    if (body && ['POST', 'PUT', 'PATCH'].includes(method.toUpperCase())) {
+      fetchOptions.body = typeof body === 'string' ? body : JSON.stringify(body);
+    }
+    const response = await fetch(url, fetchOptions);
+    clearTimeout(timeout);
+    const contentType = response.headers.get('content-type') || '';
+    let data: any;
+    if (contentType.includes('application/json')) {
+      data = await response.json();
+    } else {
+      data = await response.text();
+    }
+    return res.status(response.status).json({
+      status: response.status,
+      statusText: response.statusText,
+      ok: response.ok,
+      data,
+    });
+  } catch (err: any) {
+    return res.status(502).json({
+      status: 502,
+      ok: false,
+      error: err?.message || 'Proxy request failed',
+      isTimeout: err?.name === 'AbortError',
+    });
+  }
+});
+
 // --- 8.1 Blogger & Social Integrations Test & Dispatch ---
 app.post('/api/integrations/blogger/test', async (req: Request, res: Response) => {
   res.setHeader('Content-Type', 'application/json');

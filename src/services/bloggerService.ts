@@ -6,6 +6,7 @@
 
 import crypto from 'crypto';
 import { StorageService } from './storage.ts';
+import { integrationStore } from './integrationStore.ts';
 
 export interface BloggerPublishPayload {
   title: string;
@@ -50,14 +51,17 @@ export class BloggerService {
 
   /**
    * Publishes verified article to Blogger.
-   * If credentials are not configured, throws structured error rather than faking.
+   * Directly uses integrationStore (localStorage) as single authoritative source.
    */
   public async publishPost(payload: BloggerPublishPayload, jobId?: string): Promise<BloggerPublishResult> {
+    const enabledBloggers = integrationStore.getEnabledBloggers();
+    const activeBlogger = enabledBloggers[0];
     const bloggerConfig = this.storage.getBloggerConfig();
-    const blogId = bloggerConfig.blogId || process.env.BLOGGER_DEFAULT_BLOG_ID;
+
+    const blogId = activeBlogger?.blogId?.trim() || bloggerConfig.blogId || process.env.BLOGGER_DEFAULT_BLOG_ID;
 
     if (!blogId) {
-      throw new Error('Blogger Blog ID is missing. Configure it in Blogger Settings or BLOGGER_DEFAULT_BLOG_ID.');
+      throw new Error('Blogger Blog ID is missing. Configure an active Blogger integration in Settings -> Integrations.');
     }
 
     const idempotencyHash = this.generateIdempotencyHash(payload.title, payload.articleId);
@@ -78,19 +82,18 @@ export class BloggerService {
         url: existingArticle.bloggerPost.url,
         publishedAt: existingArticle.bloggerPost.publishedAt,
         idempotencyHash,
-        mode: bloggerConfig.publishingMode,
+        mode: (activeBlogger?.defaultStatus === 'DRAFT' || bloggerConfig.publishingMode === 'DRAFT') ? 'DRAFT' : 'LIVE',
       };
     }
 
-    const clientId = process.env.BLOGGER_CLIENT_ID;
-    const clientSecret = process.env.BLOGGER_CLIENT_SECRET;
-    const refreshToken = process.env.BLOGGER_REFRESH_TOKEN;
+    let accessToken = activeBlogger?.accessToken?.trim();
+    const clientId = activeBlogger?.clientId?.trim() || process.env.BLOGGER_CLIENT_ID;
+    const clientSecret = activeBlogger?.clientSecret?.trim() || process.env.BLOGGER_CLIENT_SECRET;
+    const refreshToken = activeBlogger?.refreshToken?.trim() || process.env.BLOGGER_REFRESH_TOKEN;
 
     // Check if OAuth credentials exist for real Google Blogger API call
-    if (!refreshToken && !clientId) {
-      // Real check: If no OAuth credentials, do NOT simulate success.
-      // Log explicit notification that Blogger is disconnected.
-      const errorMsg = 'Blogger API is DISCONNECTED. Provide BLOGGER_CLIENT_ID, BLOGGER_CLIENT_SECRET, and BLOGGER_REFRESH_TOKEN to publish live articles.';
+    if (!accessToken && !refreshToken && !clientId) {
+      const errorMsg = 'Blogger API is DISCONNECTED. Please configure and test Blogger in Settings -> Integrations.';
       this.storage.addLog({
         agentName: 'BloggerPublisherAgent',
         level: 'ERROR',
@@ -100,17 +103,22 @@ export class BloggerService {
       throw new Error(errorMsg);
     }
 
-    // Refresh OAuth access token
-    let accessToken: string;
-    try {
-      accessToken = await this.refreshAccessToken(clientId!, clientSecret!, refreshToken!);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new Error(`Blogger OAuth token refresh failed: ${msg}`);
+    // Refresh OAuth access token if needed
+    if (!accessToken && refreshToken && clientId && clientSecret) {
+      try {
+        accessToken = await this.refreshAccessToken(clientId, clientSecret, refreshToken);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(`Blogger OAuth token refresh failed: ${msg}`);
+      }
     }
 
-    const isDraft = payload.isDraft ?? (bloggerConfig.publishingMode === 'DRAFT');
-    const endpoint = `https://www.googleapis.com/blogger/v3/blogs/${blogId}/posts${isDraft ? '?isDraft=true' : ''}`;
+    if (!accessToken) {
+      throw new Error('Blogger Access Token is required to create a post.');
+    }
+
+    const isDraft = payload.isDraft ?? (activeBlogger?.defaultStatus === 'DRAFT' || bloggerConfig.publishingMode === 'DRAFT');
+    const endpoint = `https://www.googleapis.com/blogger/v3/blogs/${encodeURIComponent(blogId)}/posts${isDraft ? '?isDraft=true' : ''}`;
 
     const res = await fetch(endpoint, {
       method: 'POST',
@@ -122,7 +130,7 @@ export class BloggerService {
         kind: 'blogger#post',
         title: payload.title,
         content: payload.contentHtml,
-        labels: payload.labels && payload.labels.length > 0 ? payload.labels : bloggerConfig.defaultLabels,
+        labels: payload.labels && payload.labels.length > 0 ? payload.labels : (activeBlogger?.defaultLabels || bloggerConfig.defaultLabels),
       }),
     });
 

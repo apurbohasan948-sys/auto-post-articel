@@ -1163,3 +1163,80 @@ export const apiClient = {
     },
   },
 };
+
+export interface ProxyRequestOptions {
+  url: string;
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
+  headers?: Record<string, string>;
+  body?: any;
+  timeoutMs?: number;
+}
+
+export interface ProxyResponse<T = any> {
+  ok: boolean;
+  status: number;
+  data: T;
+  latencyMs: number;
+  error?: string;
+}
+
+export async function proxyFetch<T = any>(options: ProxyRequestOptions): Promise<ProxyResponse<T>> {
+  const startTime = Date.now();
+  const { url, method = 'GET', headers = {}, body, timeoutMs = 12000 } = options;
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    const res = await fetch('/api/proxy', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        url,
+        method,
+        headers,
+        body,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    const latencyMs = Date.now() - startTime;
+    const json = await res.json().catch(() => ({}));
+
+    if (res.ok && json.ok) {
+      return {
+        ok: true,
+        status: json.status || res.status,
+        data: json.data as T,
+        latencyMs,
+      };
+    } else {
+      const errorMsg =
+        json.data?.error?.message ||
+        json.data?.error ||
+        json.error ||
+        json.data?.description ||
+        `HTTP ${json.status || res.status}: ${res.statusText || 'Request failed'}`;
+      return {
+        ok: false,
+        status: json.status || res.status,
+        data: json.data,
+        latencyMs,
+        error: typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg),
+      };
+    }
+  } catch (proxyError: any) {
+    const latencyMs = Date.now() - startTime;
+    return {
+      ok: false,
+      status: 502,
+      data: null as any,
+      latencyMs,
+      error: proxyError?.message || 'Network communication failed',
+    };
+  }
+}
+
