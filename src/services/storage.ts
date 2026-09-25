@@ -929,7 +929,15 @@ export class StorageService {
 
     if (index >= 0) {
       const existing = store.searchProviders[index];
-      const updatedKey = provider.apiKey ? provider.apiKey : existing.apiKey;
+      let updatedKey = existing.apiKey;
+      if (typeof provider.apiKey === 'string') {
+        const trimmed = provider.apiKey.trim();
+        if (trimmed.includes('••••')) {
+          updatedKey = existing.apiKey;
+        } else {
+          updatedKey = trimmed;
+        }
+      }
       cleanProvider = {
         ...existing,
         ...provider,

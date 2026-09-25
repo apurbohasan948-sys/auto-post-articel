@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Settings,
   Save,
@@ -9,8 +9,16 @@ import {
   Sliders,
   AlertTriangle,
   Cpu,
+  Search,
+  Eye,
+  EyeOff,
+  RefreshCw,
+  Key,
+  AlertCircle,
 } from 'lucide-react';
-import { SystemSettings } from '../types/agent.ts';
+import { SystemSettings, SearchTestResult, SearchProviderConfig } from '../types/agent.ts';
+import { providerStore, isMasked, MASKED_SECRET, TavilyConfig } from '../services/providerStore.ts';
+import { apiClient } from '../services/apiClient.ts';
 
 interface SettingsViewProps {
   settings: SystemSettings;
@@ -23,6 +31,127 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onUpdateSettings,
   onNavigateToProviders,
 }) => {
+  // Tavily Configuration State (Single source of truth: tara_tavily_config)
+  const [tavilyConfig, setTavilyConfig] = useState<TavilyConfig>(() => providerStore.loadTavilyConfig());
+  const [tavilyApiKeyInput, setTavilyApiKeyInput] = useState<string>(() =>
+    providerStore.loadTavilyConfig().apiKey ? MASKED_SECRET : ''
+  );
+  const [showTavilyKey, setShowTavilyKey] = useState(false);
+  const [testingTavily, setTestingTavily] = useState(false);
+  const [tavilyTestResult, setTavilyTestResult] = useState<SearchTestResult | null>(null);
+  const [tavilySaved, setTavilySaved] = useState(false);
+
+  useEffect(() => {
+    const unsub = providerStore.subscribeTavily((conf) => {
+      setTavilyConfig(conf);
+      if (conf.apiKey) {
+        setTavilyApiKeyInput(MASKED_SECRET);
+      } else {
+        setTavilyApiKeyInput('');
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  const toggleShowTavilyKey = () => {
+    if (!showTavilyKey) {
+      if (isMasked(tavilyApiKeyInput)) {
+        setTavilyApiKeyInput(tavilyConfig.apiKey || '');
+      }
+      setShowTavilyKey(true);
+    } else {
+      if (tavilyApiKeyInput === tavilyConfig.apiKey && tavilyConfig.apiKey) {
+        setTavilyApiKeyInput(MASKED_SECRET);
+      }
+      setShowTavilyKey(false);
+    }
+  };
+
+  const handleSaveTavily = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const rawInput = tavilyApiKeyInput.trim();
+    const resolvedKey = isMasked(rawInput) ? tavilyConfig.apiKey : rawInput;
+
+    const saved = providerStore.saveTavilyConfig({
+      apiKey: resolvedKey,
+      baseUrl: tavilyConfig.baseUrl || 'https://api.tavily.com',
+      searchDepth: tavilyConfig.searchDepth || 'advanced',
+      maxResults: tavilyConfig.maxResults || 6,
+      enabled: tavilyConfig.enabled ?? true,
+    });
+
+    setTavilyConfig(saved);
+    if (saved.apiKey) {
+      setTavilyApiKeyInput(showTavilyKey ? saved.apiKey : MASKED_SECRET);
+    } else {
+      setTavilyApiKeyInput('');
+    }
+    setTavilySaved(true);
+    setTimeout(() => setTavilySaved(false), 3000);
+  };
+
+  const handleTestTavily = async () => {
+    setTestingTavily(true);
+    setTavilyTestResult(null);
+
+    const rawInput = tavilyApiKeyInput.trim();
+    const resolvedKey = isMasked(rawInput) ? tavilyConfig.apiKey : rawInput;
+
+    // Requirement 9: If key is missing, report: "Tavily API key is not configured."
+    if (!resolvedKey && !process.env.TAVILY_API_KEY) {
+      setTestingTavily(false);
+      setTavilyTestResult({
+        success: false,
+        status: 'FAILED',
+        provider: 'Tavily AI Search',
+        latencyMs: 0,
+        resultCount: 0,
+        error: 'Tavily API key is not configured.',
+        timestamp: new Date().toISOString(),
+      });
+      return;
+    }
+
+    if (resolvedKey && resolvedKey !== tavilyConfig.apiKey) {
+      providerStore.saveTavilyConfig({ apiKey: resolvedKey });
+    }
+
+    try {
+      const probeProvider: SearchProviderConfig = {
+        id: 'search_tavily',
+        name: 'Tavily AI Search',
+        type: 'tavily',
+        apiKey: resolvedKey,
+        baseUrl: tavilyConfig.baseUrl || 'https://api.tavily.com',
+        searchDepth: tavilyConfig.searchDepth || 'advanced',
+        maxResults: 3,
+        priority: 1,
+        enabled: true,
+      };
+
+      const res = await apiClient.testSearchProvider({
+        providerId: 'search_tavily',
+        provider: probeProvider,
+        query: 'ai autonomous agents research ping',
+        depth: tavilyConfig.searchDepth || 'advanced',
+        maxResults: 3,
+      });
+      setTavilyTestResult(res);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setTavilyTestResult({
+        success: false,
+        status: 'FAILED',
+        provider: 'Tavily AI Search',
+        latencyMs: 0,
+        resultCount: 0,
+        error: msg,
+        timestamp: new Date().toISOString(),
+      });
+    } finally {
+      setTestingTavily(false);
+    }
+  };
   const [formData, setFormData] = useState<SystemSettings>(() => ({
     status: settings?.status || 'IDLE',
     mode: settings?.mode || 'AUTO',
@@ -137,6 +266,141 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       )}
 
       <form onSubmit={handleSubmit} className="space-y-6">
+        {/* Tavily Web Search & Factual Grounding Section */}
+        <div id="settings-tavily-panel" className="cyber-panel p-5 sm:p-6 rounded-xl border border-slate-800 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
+            <div>
+              <h3 className="text-sm font-bold text-white uppercase tracking-wider font-mono flex items-center gap-2">
+                <Search className="w-4 h-4 text-cyan-400" />
+                Tavily AI Search Engine & Grounding
+              </h3>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Powers real-time citation synthesis, fact-checking, and zero-hallucination web research dossiers.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded text-xs font-mono font-bold ${
+                  tavilyConfig.apiKey
+                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                    : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                }`}
+              >
+                {tavilyConfig.apiKey ? <CheckCircle2 className="w-3.5 h-3.5" /> : <AlertCircle className="w-3.5 h-3.5" />}
+                <span>{tavilyConfig.apiKey ? 'Configured' : 'Key Missing'}</span>
+              </span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+            <div className="space-y-1.5 md:col-span-2">
+              <label className="text-slate-300 font-semibold flex items-center justify-between">
+                <span>Tavily API Key *</span>
+                <span className="text-[11px] text-slate-500 font-normal">Stored in tara_tavily_config</span>
+              </label>
+              <div className="relative">
+                <input
+                  type={showTavilyKey ? 'text' : 'password'}
+                  value={tavilyApiKeyInput}
+                  onChange={(e) => setTavilyApiKeyInput(e.target.value)}
+                  placeholder="tvly-..."
+                  className="w-full px-3.5 py-2.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 font-mono focus:outline-none focus:border-cyan-500 pr-10"
+                />
+                <button
+                  type="button"
+                  onClick={toggleShowTavilyKey}
+                  className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-200"
+                >
+                  {showTavilyKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-slate-300 font-semibold">Tavily Base URL</label>
+              <input
+                type="text"
+                value={tavilyConfig.baseUrl || 'https://api.tavily.com'}
+                onChange={(e) => setTavilyConfig({ ...tavilyConfig, baseUrl: e.target.value })}
+                className="w-full px-3.5 py-2.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 font-mono focus:outline-none focus:border-cyan-500"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-slate-300 font-semibold">Search Depth & Max Citations</label>
+              <div className="grid grid-cols-2 gap-2">
+                <select
+                  value={tavilyConfig.searchDepth || 'advanced'}
+                  onChange={(e) => setTavilyConfig({ ...tavilyConfig, searchDepth: e.target.value as 'basic' | 'advanced' })}
+                  className="w-full px-3.5 py-2.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 font-mono focus:outline-none focus:border-cyan-500"
+                >
+                  <option value="basic">Basic (Fast)</option>
+                  <option value="advanced">Advanced (Deep)</option>
+                </select>
+                <input
+                  type="number"
+                  min={1}
+                  max={15}
+                  value={tavilyConfig.maxResults || 6}
+                  onChange={(e) => setTavilyConfig({ ...tavilyConfig, maxResults: Number(e.target.value) || 6 })}
+                  className="w-full px-3.5 py-2.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 font-mono focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Test Result Display */}
+          {tavilyTestResult && (
+            <div
+              className={`p-3.5 rounded-xl border text-xs font-mono flex items-center gap-2 ${
+                tavilyTestResult.success
+                  ? 'bg-emerald-950/60 border-emerald-500/30 text-emerald-300'
+                  : 'bg-rose-950/60 border-rose-500/30 text-rose-300'
+              }`}
+            >
+              {tavilyTestResult.success ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              ) : (
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+              )}
+              <span>
+                {tavilyTestResult.success
+                  ? `Tavily Search Online! (${tavilyTestResult.resultsCount || tavilyTestResult.resultCount || 0} citations returned, ${tavilyTestResult.latencyMs || 0}ms)`
+                  : `Tavily Test Failed: ${tavilyTestResult.error || 'Connection error'}`}
+              </span>
+            </div>
+          )}
+
+          {tavilySaved && (
+            <div className="p-3 rounded-xl bg-emerald-950/60 border border-emerald-500/30 text-emerald-300 text-xs font-mono flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              <span>Tavily configuration saved to tara_tavily_config!</span>
+            </div>
+          )}
+
+          <div className="flex items-center justify-between pt-2 border-t border-slate-800">
+            <button
+              type="button"
+              onClick={handleTestTavily}
+              disabled={testingTavily}
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 text-xs font-mono font-bold rounded-lg border border-slate-700 flex items-center gap-2 cursor-pointer transition-colors"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${testingTavily ? 'animate-spin' : ''}`} />
+              <span>{testingTavily ? 'Testing Tavily...' : 'Test Tavily'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleSaveTavily}
+              className="px-5 py-2 bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-mono font-bold rounded-lg shadow-sm flex items-center gap-1.5 cursor-pointer transition-colors"
+            >
+              <Save className="w-3.5 h-3.5" />
+              <span>Save Tavily</span>
+            </button>
+          </div>
+        </div>
+
         {/* 1. Editorial Core */}
         <div className="cyber-panel p-5 sm:p-6 rounded-xl border border-slate-800 space-y-4">
           <h3 className="text-sm font-bold text-white uppercase tracking-wider font-mono border-b border-slate-800 pb-2">

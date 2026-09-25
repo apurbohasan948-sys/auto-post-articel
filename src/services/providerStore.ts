@@ -17,6 +17,13 @@ export const AI_PROVIDERS_KEY = 'tara_ai_api_providers';
 export const TAVILY_CONFIG_KEY = 'tara_tavily_config';
 export const SEARCH_PROVIDERS_KEY = 'tara_search_providers';
 
+export const MASKED_SECRET = '••••••••';
+
+export function isMasked(key?: string | null): boolean {
+  if (!key) return false;
+  return key.includes('••••');
+}
+
 export interface TavilyConfig {
   apiKey: string;
   enabled: boolean;
@@ -476,7 +483,9 @@ class ProviderStoreService {
     let resolvedKey = current.apiKey;
     if (typeof updates.apiKey === 'string') {
       const trimmed = updates.apiKey.trim();
-      if (trimmed && !trimmed.includes('••••')) {
+      if (trimmed.includes('••••')) {
+        resolvedKey = current.apiKey;
+      } else {
         resolvedKey = trimmed;
       }
     }
@@ -575,6 +584,18 @@ class ProviderStoreService {
       }
     }
     return true;
+  }
+
+  public resetToDefaults(): void {
+    if (this.isStorageAvailable()) {
+      window.localStorage.removeItem(AI_PROVIDERS_KEY);
+      window.localStorage.removeItem(SEARCH_PROVIDERS_KEY);
+      window.localStorage.removeItem(TAVILY_CONFIG_KEY);
+    }
+    this.memoryAiProviders = null;
+    this.memoryTavilyConfig = null;
+    this.notifySubscribers(this.loadProviders());
+    this.notifyTavilySubscribers(this.loadTavilyConfig());
   }
 
   // =========================================================================

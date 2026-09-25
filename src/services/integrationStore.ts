@@ -354,7 +354,7 @@ export class IntegrationStoreService {
         // preserve previous value
         mergedCreds[key] = existing.credentials?.[key] || '';
       } else {
-        mergedCreds[key] = val;
+        mergedCreds[key] = String(val ?? '');
       }
     }
 

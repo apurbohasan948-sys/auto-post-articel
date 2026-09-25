@@ -287,7 +287,7 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({
   const handleTestSearch = async (s: SearchProviderConfig) => {
     setSearchTestStates((prev) => ({ ...prev, [s.id]: { loading: true } }));
     try {
-      const res = await apiClient.testSearchProvider({ providerId: s.id });
+      const res = await apiClient.testSearchProvider({ providerId: s.id, provider: s });
       setSearchTestStates((prev) => ({ ...prev, [s.id]: { loading: false, result: res } }));
       if (res.success) {
         showToast(`Search test passed for ${s.name} (${res.resultsCount || res.resultCount} citations, ${res.latencyMs}ms)`);

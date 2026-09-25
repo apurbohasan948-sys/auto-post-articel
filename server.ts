@@ -13,6 +13,7 @@ import { Orchestrator } from './src/agents/Orchestrator.ts';
 import { TopicScoutAgent } from './src/agents/TopicScoutAgent.ts';
 import { decryptSecret, encryptSecret, maskApiKey } from './src/services/encryption.ts';
 import { ProviderTestingService } from './src/services/providerTestingService.ts';
+import { SearchProviderManager } from './src/services/searchProvider.ts';
 import { StorageService } from './src/services/storage.ts';
 
 const app = express();
@@ -36,7 +37,14 @@ app.post('/api/agent/run', async (req: Request, res: Response) => {
     if (Array.isArray(aiProviders) && aiProviders.length > 0) {
       storage.updateAIProviders(aiProviders);
     }
-    if (tavilyConfig && tavilyConfig.apiKey) {
+    if (tavilyConfig && tavilyConfig.apiKey && !tavilyConfig.apiKey.includes('••••')) {
+      const cleanKey = tavilyConfig.apiKey.trim();
+      SearchProviderManager.getInstance().setRuntimeTavilyApiKey(cleanKey);
+      SearchProviderManager.getInstance().setRuntimeTavilyConfig({
+        apiKey: cleanKey,
+        baseUrl: tavilyConfig.baseUrl,
+        enabled: tavilyConfig.enabled ?? true,
+      });
       const tavily = storage.getSearchProviders().find((p) => p.type === 'tavily') || {
         id: 'search_tavily',
         name: 'Tavily AI Search',
@@ -46,7 +54,7 @@ app.post('/api/agent/run', async (req: Request, res: Response) => {
       };
       storage.saveSearchProvider({
         ...tavily,
-        apiKey: tavilyConfig.apiKey,
+        apiKey: cleanKey,
         enabled: tavilyConfig.enabled ?? true,
         baseUrl: tavilyConfig.baseUrl || 'https://api.tavily.com',
       });
@@ -65,7 +73,12 @@ app.post('/api/agent/run', async (req: Request, res: Response) => {
     }
 
     // Run cycle asynchronously or await based on query
-    const runPromise = orchestrator.runCycle({ specificTopicId: topicId, isManualApprovalRun });
+    const runPromise = orchestrator.runCycle({
+      specificTopicId: topicId,
+      isManualApprovalRun,
+      tavilyConfig,
+      aiProviders,
+    });
     
     // In dev / preview, we wait up to 8 seconds or return job ID immediately if still running
     let finished = false;
@@ -645,11 +658,39 @@ app.post('/api/providers/search/toggle', (req: Request, res: Response) => {
 const handleSearchProviderTest = async (req: Request, res: Response) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const { providerId, provider, query } = req.body || {};
+    const { providerId, provider, query, depth, maxResults, tavilyConfig } = req.body || {};
     let targetProvider = provider;
 
-    if (providerId) {
+    if (!targetProvider && providerId) {
       targetProvider = storage.getSearchProviders().find((p) => p.id === providerId);
+    } else if (targetProvider && providerId) {
+      const stored = storage.getSearchProviders().find((p) => p.id === providerId);
+      if (stored) {
+        targetProvider = {
+          ...stored,
+          ...targetProvider,
+          apiKey: targetProvider.apiKey && !targetProvider.apiKey.includes('••••')
+            ? targetProvider.apiKey
+            : (stored.apiKey || process.env.TAVILY_API_KEY || ''),
+        };
+      }
+    }
+
+    if (tavilyConfig && tavilyConfig.apiKey && !tavilyConfig.apiKey.includes('••••')) {
+      if (!targetProvider || targetProvider.type === 'tavily') {
+        targetProvider = {
+          ...(targetProvider || {}),
+          id: 'search_tavily',
+          name: 'Tavily AI Search',
+          type: 'tavily',
+          baseUrl: tavilyConfig.baseUrl || 'https://api.tavily.com',
+          apiKey: tavilyConfig.apiKey.trim(),
+          searchDepth: tavilyConfig.searchDepth || 'advanced',
+          maxResults: tavilyConfig.maxResults || 6,
+          priority: 1,
+          enabled: true,
+        };
+      }
     }
 
     if (!targetProvider) {
@@ -666,14 +707,24 @@ const handleSearchProviderTest = async (req: Request, res: Response) => {
 
     if (targetProvider.apiKey && targetProvider.apiKey.includes('••••')) {
       const stored = storage.getSearchProviders().find((p) => p.id === targetProvider.id);
-      if (stored) targetProvider.apiKey = stored.apiKey;
+      if (stored && stored.apiKey && !stored.apiKey.includes('••••')) {
+        targetProvider.apiKey = stored.apiKey;
+      } else if (process.env.TAVILY_API_KEY) {
+        targetProvider.apiKey = process.env.TAVILY_API_KEY;
+      }
+    }
+
+    // If key is present and target is Tavily, keep storage and SearchProviderManager synchronized
+    if (targetProvider.type === 'tavily' && targetProvider.apiKey && !targetProvider.apiKey.includes('••••')) {
+      storage.saveSearchProvider(targetProvider);
+      SearchProviderManager.getInstance().setRuntimeTavilyApiKey(targetProvider.apiKey);
     }
 
     const testResult = await testingService.testSearchProvider(
       targetProvider,
       query || 'ai agent verification ping',
-      'basic',
-      3
+      depth || 'basic',
+      maxResults || 3
     );
     res.json(testResult);
   } catch (err: unknown) {
@@ -695,11 +746,39 @@ app.post('/api/providers/search/test', handleSearchProviderTest);
 
 app.post('/api/providers/search/playground', async (req: Request, res: Response) => {
   try {
-    const { providerId, provider, query, depth, maxResults } = req.body;
+    const { providerId, provider, query, depth, maxResults, tavilyConfig } = req.body;
     let targetProvider = provider;
 
-    if (providerId) {
+    if (!targetProvider && providerId) {
       targetProvider = storage.getSearchProviders().find((p) => p.id === providerId);
+    } else if (targetProvider && providerId) {
+      const stored = storage.getSearchProviders().find((p) => p.id === providerId);
+      if (stored) {
+        targetProvider = {
+          ...stored,
+          ...targetProvider,
+          apiKey: targetProvider.apiKey && !targetProvider.apiKey.includes('••••')
+            ? targetProvider.apiKey
+            : (stored.apiKey || process.env.TAVILY_API_KEY || ''),
+        };
+      }
+    }
+
+    if (tavilyConfig && tavilyConfig.apiKey && !tavilyConfig.apiKey.includes('••••')) {
+      if (!targetProvider || targetProvider.type === 'tavily') {
+        targetProvider = {
+          ...(targetProvider || {}),
+          id: 'search_tavily',
+          name: 'Tavily AI Search',
+          type: 'tavily',
+          baseUrl: tavilyConfig.baseUrl || 'https://api.tavily.com',
+          apiKey: tavilyConfig.apiKey.trim(),
+          searchDepth: tavilyConfig.searchDepth || 'advanced',
+          maxResults: tavilyConfig.maxResults || 6,
+          priority: 1,
+          enabled: true,
+        };
+      }
     }
 
     if (!targetProvider) {
@@ -708,7 +787,16 @@ app.post('/api/providers/search/playground', async (req: Request, res: Response)
 
     if (targetProvider.apiKey && targetProvider.apiKey.includes('••••')) {
       const stored = storage.getSearchProviders().find((p) => p.id === targetProvider.id);
-      if (stored) targetProvider.apiKey = stored.apiKey;
+      if (stored && stored.apiKey && !stored.apiKey.includes('••••')) {
+        targetProvider.apiKey = stored.apiKey;
+      } else if (process.env.TAVILY_API_KEY) {
+        targetProvider.apiKey = process.env.TAVILY_API_KEY;
+      }
+    }
+
+    if (targetProvider.type === 'tavily' && targetProvider.apiKey && !targetProvider.apiKey.includes('••••')) {
+      storage.saveSearchProvider(targetProvider);
+      SearchProviderManager.getInstance().setRuntimeTavilyApiKey(targetProvider.apiKey);
     }
 
     const result = await testingService.testSearchProvider(

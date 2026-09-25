@@ -9,6 +9,7 @@ import { Orchestrator } from '../../src/agents/Orchestrator.ts';
 import { TopicScoutAgent } from '../../src/agents/TopicScoutAgent.ts';
 import { decryptSecret, encryptSecret, maskApiKey } from '../../src/services/encryption.ts';
 import { ProviderTestingService } from '../../src/services/providerTestingService.ts';
+import { SearchProviderManager } from '../../src/services/searchProvider.ts';
 import { StorageService } from '../../src/services/storage.ts';
 
 export const handler = async (event: any) => {
@@ -45,7 +46,38 @@ export const handler = async (event: any) => {
 
     // Router matching
     if (path === '/agent/run' && method === 'POST') {
-      const job = await orchestrator.runCycle(body);
+      const { topicId, isManualApprovalRun, aiProviders, tavilyConfig } = body || {};
+      if (Array.isArray(aiProviders) && aiProviders.length > 0) {
+        storage.updateAIProviders(aiProviders);
+      }
+      if (tavilyConfig && tavilyConfig.apiKey && !tavilyConfig.apiKey.includes('••••')) {
+        const cleanKey = tavilyConfig.apiKey.trim();
+        SearchProviderManager.getInstance().setRuntimeTavilyApiKey(cleanKey);
+        SearchProviderManager.getInstance().setRuntimeTavilyConfig({
+          apiKey: cleanKey,
+          baseUrl: tavilyConfig.baseUrl,
+          enabled: tavilyConfig.enabled ?? true,
+        });
+        const tavily = storage.getSearchProviders().find((p) => p.type === 'tavily') || {
+          id: 'search_tavily',
+          name: 'Tavily AI Search',
+          type: 'tavily',
+          baseUrl: tavilyConfig.baseUrl || 'https://api.tavily.com',
+          priority: 1,
+        };
+        storage.saveSearchProvider({
+          ...tavily,
+          apiKey: cleanKey,
+          enabled: tavilyConfig.enabled ?? true,
+          baseUrl: tavilyConfig.baseUrl || 'https://api.tavily.com',
+        });
+      }
+      const job = await orchestrator.runCycle({
+        specificTopicId: topicId,
+        isManualApprovalRun,
+        tavilyConfig,
+        aiProviders,
+      });
       return { statusCode: 200, headers, body: JSON.stringify({ success: true, job }) };
     }
 
@@ -499,9 +531,38 @@ export const handler = async (event: any) => {
 
     if ((path === '/search/test' || path === '/providers/search/test') && method === 'POST') {
       let target = body.provider;
-      if (body.providerId) {
+      if (!target && body.providerId) {
         target = storage.getSearchProviders().find((p) => p.id === body.providerId);
+      } else if (target && body.providerId) {
+        const stored = storage.getSearchProviders().find((p) => p.id === body.providerId);
+        if (stored) {
+          target = {
+            ...stored,
+            ...target,
+            apiKey: target.apiKey && !target.apiKey.includes('••••')
+              ? target.apiKey
+              : (stored.apiKey || process.env.TAVILY_API_KEY || ''),
+          };
+        }
       }
+
+      if (body.tavilyConfig && body.tavilyConfig.apiKey && !body.tavilyConfig.apiKey.includes('••••')) {
+        if (!target || target.type === 'tavily') {
+          target = {
+            ...(target || {}),
+            id: 'search_tavily',
+            name: 'Tavily AI Search',
+            type: 'tavily',
+            baseUrl: body.tavilyConfig.baseUrl || 'https://api.tavily.com',
+            apiKey: body.tavilyConfig.apiKey.trim(),
+            searchDepth: body.tavilyConfig.searchDepth || 'advanced',
+            maxResults: body.tavilyConfig.maxResults || 6,
+            priority: 1,
+            enabled: true,
+          };
+        }
+      }
+
       if (!target) {
         return {
           statusCode: 404,
@@ -520,10 +581,21 @@ export const handler = async (event: any) => {
           }),
         };
       }
+
       if (target.apiKey && target.apiKey.includes('••••')) {
         const stored = storage.getSearchProviders().find((p) => p.id === target.id);
-        if (stored) target.apiKey = stored.apiKey;
+        if (stored && stored.apiKey && !stored.apiKey.includes('••••')) {
+          target.apiKey = stored.apiKey;
+        } else if (process.env.TAVILY_API_KEY) {
+          target.apiKey = process.env.TAVILY_API_KEY;
+        }
       }
+
+      if (target.type === 'tavily' && target.apiKey && !target.apiKey.includes('••••')) {
+        storage.saveSearchProvider(target);
+        SearchProviderManager.getInstance().setRuntimeTavilyApiKey(target.apiKey);
+      }
+
       const result = await testingService.testSearchProvider(target, body.query || 'ai agent verification ping', body.depth || 'basic', body.maxResults || 3);
       const httpStatus = typeof result.status === 'number' ? result.status : result.success ? 200 : 400;
       return { statusCode: httpStatus, headers, body: JSON.stringify(result) };
@@ -531,14 +603,54 @@ export const handler = async (event: any) => {
 
     if (path === '/providers/search/playground' && method === 'POST') {
       let target = body.provider;
-      if (body.providerId) {
+      if (!target && body.providerId) {
         target = storage.getSearchProviders().find((p) => p.id === body.providerId);
+      } else if (target && body.providerId) {
+        const stored = storage.getSearchProviders().find((p) => p.id === body.providerId);
+        if (stored) {
+          target = {
+            ...stored,
+            ...target,
+            apiKey: target.apiKey && !target.apiKey.includes('••••')
+              ? target.apiKey
+              : (stored.apiKey || process.env.TAVILY_API_KEY || ''),
+          };
+        }
       }
+
+      if (body.tavilyConfig && body.tavilyConfig.apiKey && !body.tavilyConfig.apiKey.includes('••••')) {
+        if (!target || target.type === 'tavily') {
+          target = {
+            ...(target || {}),
+            id: 'search_tavily',
+            name: 'Tavily AI Search',
+            type: 'tavily',
+            baseUrl: body.tavilyConfig.baseUrl || 'https://api.tavily.com',
+            apiKey: body.tavilyConfig.apiKey.trim(),
+            searchDepth: body.tavilyConfig.searchDepth || 'advanced',
+            maxResults: body.tavilyConfig.maxResults || 6,
+            priority: 1,
+            enabled: true,
+          };
+        }
+      }
+
       if (!target) return { statusCode: 404, headers, body: JSON.stringify({ error: 'Search provider not found' }) };
+
       if (target.apiKey && target.apiKey.includes('••••')) {
         const stored = storage.getSearchProviders().find((p) => p.id === target.id);
-        if (stored) target.apiKey = stored.apiKey;
+        if (stored && stored.apiKey && !stored.apiKey.includes('••••')) {
+          target.apiKey = stored.apiKey;
+        } else if (process.env.TAVILY_API_KEY) {
+          target.apiKey = process.env.TAVILY_API_KEY;
+        }
       }
+
+      if (target.type === 'tavily' && target.apiKey && !target.apiKey.includes('••••')) {
+        storage.saveSearchProvider(target);
+        SearchProviderManager.getInstance().setRuntimeTavilyApiKey(target.apiKey);
+      }
+
       const result = await testingService.testSearchProvider(
         target,
         body.query || 'latest artificial intelligence trends',

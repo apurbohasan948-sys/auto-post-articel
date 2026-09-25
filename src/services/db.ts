@@ -286,7 +286,7 @@ export class DatabaseEngine {
           name = excluded.name,
           provider_type = excluded.provider_type,
           base_url = excluded.base_url,
-          api_key_encrypted = CASE WHEN excluded.api_key_encrypted != '' THEN excluded.api_key_encrypted ELSE search_providers.api_key_encrypted END,
+          api_key_encrypted = CASE WHEN excluded.api_key_encrypted LIKE '%••••%' THEN search_providers.api_key_encrypted ELSE excluded.api_key_encrypted END,
           priority = excluded.priority,
           enabled = excluded.enabled,
           timeout_ms = excluded.timeout_ms,

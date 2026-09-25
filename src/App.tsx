@@ -23,7 +23,6 @@ import {
   normalizeMemory,
 } from './services/apiClient.ts';
 import { providerStore } from './services/providerStore.ts';
-import { safeStorage } from './utils/safeStorage.ts';
 import {
   AgentJob,
   AgentMemory,

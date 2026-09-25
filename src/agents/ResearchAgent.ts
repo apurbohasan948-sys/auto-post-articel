@@ -21,7 +21,11 @@ export class ResearchAgent {
     this.storage = StorageService.getInstance();
   }
 
-  public async conductResearch(topic: TopicCandidate, jobId?: string): Promise<ResearchPackage> {
+  public async conductResearch(
+    topic: TopicCandidate,
+    jobId?: string,
+    runtimeTavilyApiKey?: string
+  ): Promise<ResearchPackage> {
     this.storage.addLog({
       agentName: 'ResearchAgent',
       level: 'INFO',
@@ -31,7 +35,7 @@ export class ResearchAgent {
 
     // 1. Search the web for actual live sources
     const searchQuery = `${topic.topic} ${topic.keywords.slice(0, 3).join(' ')}`;
-    const searchResponse = await this.search.searchWeb(searchQuery, jobId);
+    const searchResponse = await this.search.searchWeb(searchQuery, jobId, runtimeTavilyApiKey);
 
     if (searchResponse.results.length === 0) {
       throw new Error(`Web research failed to retrieve any external sources for query: "${searchQuery}"`);

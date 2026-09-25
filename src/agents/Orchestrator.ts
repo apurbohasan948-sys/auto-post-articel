@@ -6,6 +6,7 @@
  */
 
 import { StorageService } from '../services/storage.ts';
+import { SearchProviderManager } from '../services/searchProvider.ts';
 import { AgentJob, Article, JobStepRecord, PipelineStep, TopicCandidate } from '../types/agent.ts';
 import { AnalyticsMonitorAgent } from './AnalyticsMonitorAgent.ts';
 import { BloggerPublisherAgent } from './BloggerPublisherAgent.ts';
@@ -101,8 +102,47 @@ export class Orchestrator {
   /**
    * Primary entry point: Runs a full autonomous cycle.
    */
-  public async runCycle(options?: { specificTopicId?: string; isManualApprovalRun?: boolean }): Promise<AgentJob> {
+  public async runCycle(options?: {
+    specificTopicId?: string;
+    isManualApprovalRun?: boolean;
+    tavilyConfig?: { apiKey?: string; baseUrl?: string; enabled?: boolean; searchDepth?: string; maxResults?: number };
+    aiProviders?: any[];
+  }): Promise<AgentJob> {
     const settings = this.storage.getSettings();
+
+    // If Tavily runtime configuration is provided, configure SearchProviderManager and storage immediately
+    if (options?.tavilyConfig?.apiKey) {
+      const cleanKey = options.tavilyConfig.apiKey.trim();
+      if (!cleanKey.includes('••••')) {
+        SearchProviderManager.getInstance().setRuntimeTavilyApiKey(cleanKey);
+        if (options.tavilyConfig.baseUrl) {
+          SearchProviderManager.getInstance().setRuntimeTavilyConfig({
+            apiKey: cleanKey,
+            baseUrl: options.tavilyConfig.baseUrl,
+            enabled: options.tavilyConfig.enabled ?? true,
+          });
+        }
+        const existingTavily = this.storage.getSearchProviders().find((p) => p.type === 'tavily');
+        this.storage.saveSearchProvider({
+          ...(existingTavily || {
+            id: 'search_tavily',
+            name: 'Tavily AI Search',
+            type: 'tavily',
+            baseUrl: options.tavilyConfig.baseUrl || 'https://api.tavily.com',
+            searchDepth: 'advanced',
+            maxResults: 6,
+            priority: 1,
+          }),
+          apiKey: cleanKey,
+          enabled: options.tavilyConfig.enabled ?? true,
+          baseUrl: options.tavilyConfig.baseUrl || existingTavily?.baseUrl || 'https://api.tavily.com',
+        });
+      }
+    }
+
+    if (Array.isArray(options?.aiProviders) && options.aiProviders.length > 0) {
+      this.storage.updateAIProviders(options.aiProviders);
+    }
 
     // Check if stopped or paused
     if (this.isStopped) {
@@ -178,9 +218,14 @@ export class Orchestrator {
       job.topicTitle = selectedTopic.suggestedTitle;
       this.storage.saveJob(job);
 
+      const runtimeTavilyKey =
+        options?.tavilyConfig?.apiKey && !options.tavilyConfig.apiKey.includes('••••')
+          ? options.tavilyConfig.apiKey.trim()
+          : undefined;
+
       // --- STAGE 2: WEB RESEARCH ---
       let researchPackage = await this.runStep(job, 'WEB_RESEARCH', async (stepRecord) => {
-        const pkg = await this.researchAgent.conductResearch(selectedTopic!, jobId);
+        const pkg = await this.researchAgent.conductResearch(selectedTopic!, jobId, runtimeTavilyKey);
         stepRecord.summary = `Extracted ${pkg.sources.length} sources and ${pkg.facts.length} empirical facts.`;
         return pkg;
       });
@@ -197,7 +242,7 @@ export class Orchestrator {
             message: 'Topic Decision requested additional research. Re-querying web sources...',
             jobId,
           });
-          researchPackage = await this.researchAgent.conductResearch(selectedTopic!, jobId);
+          researchPackage = await this.researchAgent.conductResearch(selectedTopic!, jobId, runtimeTavilyKey);
           dec = await this.decisionAgent.evaluateTopic(selectedTopic!, researchPackage, jobId);
         }
 
