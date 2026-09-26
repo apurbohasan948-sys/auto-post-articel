@@ -764,7 +764,7 @@ export const handler = async (event: any) => {
         };
       }
 
-      const scope = encodeURIComponent('https://www.googleapis.com/auth/blogger');
+      const scope = encodeURIComponent('https://www.googleapis.com/auth/blogger https://www.googleapis.com/auth/userinfo.email openid');
       const state = q.state ? encodeURIComponent(q.state) : '';
       const oauthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(
         clientId
@@ -928,6 +928,250 @@ export const handler = async (event: any) => {
           refreshToken: tokenData.refresh_token,
           expiresIn: tokenData.expires_in,
           scope: tokenData.scope,
+        }),
+      };
+    }
+
+    if ((path === '/integrations/blogger/verify' || path === '/integrations/blogger/test') && method === 'POST') {
+      const payload = body?.integration || body || {};
+      const { blogId: rawBlogId, publicBlogUrl: rawUrl, accessToken: rawToken, refreshToken: rawRefresh, clientId: customClientId, clientSecret: customClientSecret } = payload;
+      let accessToken = rawToken?.trim();
+      const clientId = customClientId?.trim() || process.env.BLOGGER_CLIENT_ID;
+      const clientSecret = customClientSecret?.trim() || process.env.BLOGGER_CLIENT_SECRET;
+      const refreshToken = rawRefresh?.trim();
+
+      if (!accessToken && refreshToken && clientId && clientSecret) {
+        try {
+          const refreshRes = await fetch('https://oauth2.googleapis.com/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+              client_id: clientId,
+              client_secret: clientSecret,
+              refresh_token: refreshToken,
+              grant_type: 'refresh_token',
+            }).toString(),
+          });
+          if (refreshRes.ok) {
+            const refreshJson = await refreshRes.json();
+            accessToken = refreshJson.access_token;
+          }
+        } catch {}
+      }
+
+      const cleanBlogId = (rawBlogId || '').trim();
+      const noSpacesUrl = (rawUrl || '').trim().replace(/\s+/g, '');
+      let normalizedUrl = noSpacesUrl;
+      if (normalizedUrl && !/^https?:\/\//i.test(normalizedUrl)) {
+        normalizedUrl = `https://${normalizedUrl}`;
+      }
+
+      let targetHostname = '';
+      if (normalizedUrl) {
+        try {
+          targetHostname = new URL(normalizedUrl).hostname.toLowerCase();
+        } catch {
+          targetHostname = normalizedUrl.replace(/^https?:\/\//i, '').split('/')[0].toLowerCase();
+        }
+      }
+
+      if (!accessToken) {
+        return {
+          statusCode: 200,
+          headers,
+          body: JSON.stringify({
+            success: false,
+            status: 'FAILED',
+            error: 'OAuth Access Token is missing from this session.',
+            diagnostics: {
+              oauthAccount: null,
+              requestedBlogId: cleanBlogId,
+              requestedBlogUrl: normalizedUrl,
+              getBlogIdStatus: 0,
+              getByUrlStatus: 0,
+              listByUserStatus: 0,
+              listByUserCount: 0,
+              returnedBlogIds: [],
+              returnedBlogUrls: [],
+              explanation: 'OAuth Access Token is missing from this session.',
+            },
+          }),
+        };
+      }
+
+      let oauthAccount: string | null = null;
+      try {
+        const tokenInfoRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(accessToken)}`);
+        if (tokenInfoRes.ok) {
+          const tokenInfo = await tokenInfoRes.json();
+          oauthAccount = tokenInfo.email || tokenInfo.sub || null;
+        }
+      } catch {}
+
+      try {
+        const userRes = await fetch('https://www.googleapis.com/blogger/v3/users/self', {
+          headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+        });
+        if (userRes.ok) {
+          const userData = await userRes.json();
+          if (!oauthAccount && userData.displayName) oauthAccount = userData.displayName;
+          else if (oauthAccount && userData.displayName && !oauthAccount.includes(userData.displayName)) {
+            oauthAccount = `${oauthAccount} (${userData.displayName})`;
+          }
+        }
+      } catch {}
+
+      let getBlogIdStatus = 0;
+      let getBlogData: any = null;
+      if (cleanBlogId) {
+        try {
+          const res1 = await fetch(`https://www.googleapis.com/blogger/v3/blogs/${encodeURIComponent(cleanBlogId)}`, {
+            headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+          });
+          getBlogIdStatus = res1.status;
+          if (res1.ok) getBlogData = await res1.json();
+        } catch {
+          getBlogIdStatus = 500;
+        }
+      }
+
+      let getByUrlStatus = 0;
+      let getByUrlData: any = null;
+      if (normalizedUrl) {
+        try {
+          let res2 = await fetch(`https://www.googleapis.com/blogger/v3/blogs/byurl?url=${encodeURIComponent(normalizedUrl)}`, {
+            headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+          });
+          getByUrlStatus = res2.status;
+          if (res2.ok) {
+            getByUrlData = await res2.json();
+          } else if (!normalizedUrl.endsWith('/')) {
+            const retryRes = await fetch(`https://www.googleapis.com/blogger/v3/blogs/byurl?url=${encodeURIComponent(normalizedUrl + '/')}`, {
+              headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+            });
+            if (retryRes.ok) {
+              getByUrlStatus = retryRes.status;
+              getByUrlData = await retryRes.json();
+            }
+          }
+        } catch {
+          getByUrlStatus = 500;
+        }
+      }
+
+      let listByUserStatus = 0;
+      let listByUserItems: any[] = [];
+      try {
+        const res3 = await fetch('https://www.googleapis.com/blogger/v3/users/self/blogs', {
+          headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+        });
+        listByUserStatus = res3.status;
+        if (res3.ok) {
+          const data3 = await res3.json();
+          listByUserItems = Array.isArray(data3.items) ? data3.items : [];
+        }
+      } catch {
+        listByUserStatus = 500;
+      }
+
+      const listByUserCount = listByUserItems.length;
+      const returnedBlogIds = listByUserItems.map((b: any) => String(b.id || '').trim());
+      const returnedBlogUrls = listByUserItems.map((b: any) => String(b.url || '').trim());
+
+      let matchedBlog: any = null;
+      if (cleanBlogId) {
+        matchedBlog = listByUserItems.find((b: any) => String(b.id || '').trim() === cleanBlogId);
+      }
+      if (!matchedBlog && getByUrlData?.id) {
+        matchedBlog = listByUserItems.find((b: any) => String(b.id || '').trim() === String(getByUrlData.id).trim());
+      }
+      if (!matchedBlog && targetHostname) {
+        matchedBlog = listByUserItems.find((b: any) => {
+          try {
+            return new URL(b.url).hostname.toLowerCase() === targetHostname;
+          } catch {
+            return false;
+          }
+        });
+      }
+      if (!matchedBlog && getByUrlData?.id && getBlogIdStatus !== 200) {
+        try {
+          const getByUrlIdRes = await fetch(`https://www.googleapis.com/blogger/v3/blogs/${encodeURIComponent(String(getByUrlData.id).trim())}`, {
+            headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+          });
+          if (getByUrlIdRes.ok) matchedBlog = await getByUrlIdRes.json();
+        } catch {}
+      }
+      if (!matchedBlog && getBlogIdStatus === 200 && getBlogData?.id) {
+        matchedBlog = getBlogData;
+      }
+
+      if (matchedBlog) {
+        const verifiedBlogId = String(matchedBlog.id).trim();
+        const verifiedBlogUrl = String(matchedBlog.url || normalizedUrl).trim();
+        const verifiedBlogName = String(matchedBlog.name || 'Blogger Blog').trim();
+        const postsCount = matchedBlog.posts?.totalItems ?? 0;
+
+        let explanation = '';
+        if (cleanBlogId && cleanBlogId !== verifiedBlogId) {
+          explanation = `Requested Blog ID "${cleanBlogId}" returned HTTP ${getBlogIdStatus}, but blog was resolved by URL / Google account to Blog ID "${verifiedBlogId}" ("${verifiedBlogName}"). Automatically using verified Blog ID.`;
+        } else if (getBlogIdStatus === 404 && verifiedBlogId === cleanBlogId) {
+          explanation = `Direct get(${cleanBlogId}) returned HTTP 404, but blog was verified in your Google account blogs list.`;
+        } else {
+          explanation = `Verified access to "${verifiedBlogName}" (${postsCount} posts).`;
+        }
+
+        return {
+          statusCode: 200,
+          headers,
+          body: JSON.stringify({
+            success: true,
+            status: 'CONNECTED',
+            blogId: verifiedBlogId,
+            blogName: verifiedBlogName,
+            blogUrl: verifiedBlogUrl,
+            postsCount,
+            diagnostics: {
+              oauthAccount,
+              requestedBlogId: cleanBlogId,
+              requestedBlogUrl: normalizedUrl,
+              getBlogIdStatus,
+              getByUrlStatus,
+              listByUserStatus,
+              listByUserCount,
+              returnedBlogIds,
+              returnedBlogUrls,
+              explanation,
+            },
+            message: explanation,
+          }),
+        };
+      }
+
+      const accountPrefix = oauthAccount ? `The Google account (${oauthAccount})` : 'The Google account';
+      const errorMessage = `${accountPrefix} used for OAuth does not have access to this Blogger blog.`;
+      const explanation = `Verification failed: get(${cleanBlogId || 'N/A'}) returned HTTP ${getBlogIdStatus}, getByUrl returned HTTP ${getByUrlStatus}, and blogs.listByUser returned ${listByUserCount} blog(s). None matched the requested blog.`;
+
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          success: false,
+          status: 'FAILED',
+          error: errorMessage,
+          message: errorMessage,
+          diagnostics: {
+            oauthAccount,
+            requestedBlogId: cleanBlogId,
+            requestedBlogUrl: normalizedUrl,
+            getBlogIdStatus,
+            getByUrlStatus,
+            listByUserStatus,
+            listByUserCount,
+            returnedBlogIds,
+            returnedBlogUrls,
+            explanation,
+          },
         }),
       };
     }

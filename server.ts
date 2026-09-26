@@ -17,6 +17,7 @@ import { SearchProviderManager } from './src/services/searchProvider.ts';
 import { StorageService } from './src/services/storage.ts';
 
 const app = express();
+app.enable('trust proxy');
 const PORT = 3000;
 
 app.use(express.json({ limit: '10mb' }));
@@ -939,7 +940,7 @@ app.get('/api/blogger/oauth/url', (req: Request, res: Response) => {
     });
   }
 
-  const scope = encodeURIComponent('https://www.googleapis.com/auth/blogger');
+  const scope = encodeURIComponent('https://www.googleapis.com/auth/blogger https://www.googleapis.com/auth/userinfo.email openid');
   const state = req.query.state ? encodeURIComponent(req.query.state as string) : '';
   const oauthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(
     clientId
@@ -1244,108 +1245,385 @@ app.post('/api/proxy', async (req: Request, res: Response) => {
 });
 
 // --- 8.1 Blogger & Social Integrations Test & Dispatch ---
+
+export interface SafeBloggerDiagnostics {
+  oauthAccount: string | null;
+  requestedBlogId: string;
+  requestedBlogUrl: string;
+  getBlogIdStatus: number;
+  getByUrlStatus: number;
+  listByUserStatus: number;
+  listByUserCount: number;
+  returnedBlogIds: string[];
+  returnedBlogUrls: string[];
+  explanation?: string;
+}
+
+export async function verifyBloggerConnection(params: {
+  blogId?: string;
+  publicBlogUrl?: string;
+  accessToken?: string;
+  refreshToken?: string;
+  clientId?: string;
+  clientSecret?: string;
+}) {
+  const startTime = Date.now();
+  let accessToken = params.accessToken?.trim();
+  const clientId = params.clientId?.trim() || process.env.BLOGGER_CLIENT_ID;
+  const clientSecret = params.clientSecret?.trim() || process.env.BLOGGER_CLIENT_SECRET;
+  const refreshToken = params.refreshToken?.trim();
+
+  // If no accessToken provided, but refreshToken + credentials provided, attempt refresh
+  if (!accessToken && refreshToken && clientId && clientSecret) {
+    try {
+      const refreshRes = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: clientId,
+          client_secret: clientSecret,
+          refresh_token: refreshToken,
+          grant_type: 'refresh_token',
+        }).toString(),
+      });
+      if (refreshRes.ok) {
+        const refreshJson = await refreshRes.json();
+        accessToken = refreshJson.access_token;
+      }
+    } catch {}
+  }
+
+  const rawBlogId = params.blogId || '';
+  const cleanBlogId = rawBlogId.trim();
+  const rawUrl = params.publicBlogUrl || '';
+  // Normalization: strip internal whitespace (e.g. "cinez onex" -> "cinezonex")
+  const noSpacesUrl = rawUrl.trim().replace(/\s+/g, '');
+  let normalizedUrl = noSpacesUrl;
+  if (normalizedUrl && !/^https?:\/\//i.test(normalizedUrl)) {
+    normalizedUrl = `https://${normalizedUrl}`;
+  }
+
+  let targetHostname = '';
+  if (normalizedUrl) {
+    try {
+      targetHostname = new URL(normalizedUrl).hostname.toLowerCase();
+    } catch {
+      targetHostname = normalizedUrl.replace(/^https?:\/\//i, '').split('/')[0].toLowerCase();
+    }
+  }
+
+  if (!accessToken) {
+    const emptyDiagnostics: SafeBloggerDiagnostics = {
+      oauthAccount: null,
+      requestedBlogId: cleanBlogId,
+      requestedBlogUrl: normalizedUrl,
+      getBlogIdStatus: 0,
+      getByUrlStatus: 0,
+      listByUserStatus: 0,
+      listByUserCount: 0,
+      returnedBlogIds: [],
+      returnedBlogUrls: [],
+      explanation: 'OAuth Access Token is missing from this session.',
+    };
+    return {
+      success: false,
+      status: 'FAILED',
+      error: 'OAuth Access Token is missing from this session. Please connect with Google OAuth.',
+      diagnostics: emptyDiagnostics,
+      latencyMs: Date.now() - startTime,
+    };
+  }
+
+  // 0. Extract user identity safely
+  let oauthAccount: string | null = null;
+  try {
+    const tokenInfoRes = await fetch(
+      `https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(accessToken)}`
+    );
+    if (tokenInfoRes.ok) {
+      const tokenInfo = await tokenInfoRes.json();
+      oauthAccount = tokenInfo.email || tokenInfo.sub || null;
+    }
+  } catch {}
+
+  try {
+    const userRes = await fetch('https://www.googleapis.com/blogger/v3/users/self', {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json',
+      },
+    });
+    if (userRes.ok) {
+      const userData = await userRes.json();
+      if (!oauthAccount && userData.displayName) {
+        oauthAccount = userData.displayName;
+      } else if (oauthAccount && userData.displayName && !oauthAccount.includes(userData.displayName)) {
+        oauthAccount = `${oauthAccount} (${userData.displayName})`;
+      }
+    }
+  } catch {}
+
+  // 1. GET Blogger API: blogs.get(cleanBlogId)
+  let getBlogIdStatus = 0;
+  let getBlogData: any = null;
+  if (cleanBlogId) {
+    try {
+      const res1 = await fetch(
+        `https://www.googleapis.com/blogger/v3/blogs/${encodeURIComponent(cleanBlogId)}`,
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            Accept: 'application/json',
+          },
+        }
+      );
+      getBlogIdStatus = res1.status;
+      if (res1.ok) {
+        getBlogData = await res1.json();
+      }
+    } catch {
+      getBlogIdStatus = 500;
+    }
+  }
+
+  // 2. GET Blogger API: blogs.getByUrl(normalizedUrl)
+  let getByUrlStatus = 0;
+  let getByUrlData: any = null;
+  if (normalizedUrl) {
+    try {
+      let res2 = await fetch(
+        `https://www.googleapis.com/blogger/v3/blogs/byurl?url=${encodeURIComponent(normalizedUrl)}`,
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            Accept: 'application/json',
+          },
+        }
+      );
+      getByUrlStatus = res2.status;
+      if (res2.ok) {
+        getByUrlData = await res2.json();
+      } else if (!normalizedUrl.endsWith('/')) {
+        const retryRes = await fetch(
+          `https://www.googleapis.com/blogger/v3/blogs/byurl?url=${encodeURIComponent(normalizedUrl + '/')}`,
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              Accept: 'application/json',
+            },
+          }
+        );
+        if (retryRes.ok) {
+          getByUrlStatus = retryRes.status;
+          getByUrlData = await retryRes.json();
+        }
+      }
+    } catch {
+      getByUrlStatus = 500;
+    }
+  }
+
+  // 3. GET Blogger API: blogs.listByUser (self)
+  let listByUserStatus = 0;
+  let listByUserItems: any[] = [];
+  try {
+    const res3 = await fetch('https://www.googleapis.com/blogger/v3/users/self/blogs', {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json',
+      },
+    });
+    listByUserStatus = res3.status;
+    if (res3.ok) {
+      const data3 = await res3.json();
+      listByUserItems = Array.isArray(data3.items) ? data3.items : [];
+    }
+  } catch {
+    listByUserStatus = 500;
+  }
+
+  const listByUserCount = listByUserItems.length;
+  const returnedBlogIds = listByUserItems.map((b: any) => String(b.id || '').trim());
+  const returnedBlogUrls = listByUserItems.map((b: any) => String(b.url || '').trim());
+
+  // 4. Compare returned blog IDs and URLs
+  // Rule 6: Check if listByUser contains the blog
+  let matchedBlog: any = null;
+
+  // Check direct Blog ID match in listByUser
+  if (cleanBlogId) {
+    matchedBlog = listByUserItems.find((b: any) => String(b.id || '').trim() === cleanBlogId);
+  }
+
+  // Check if getByUrl resolved a blog ID that is in listByUser
+  if (!matchedBlog && getByUrlData?.id) {
+    const urlResolvedId = String(getByUrlData.id).trim();
+    matchedBlog = listByUserItems.find((b: any) => String(b.id || '').trim() === urlResolvedId);
+  }
+
+  // Check if any blog in listByUser matches the hostname of publicBlogUrl
+  if (!matchedBlog && targetHostname) {
+    matchedBlog = listByUserItems.find((b: any) => {
+      try {
+        const h = new URL(b.url).hostname.toLowerCase();
+        return h === targetHostname;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  // Rule 7: If getByUrl succeeds but get(blogId) fails, check if the resolved blog is accessible
+  if (!matchedBlog && getByUrlData?.id && getBlogIdStatus !== 200) {
+    try {
+      const getByUrlIdRes = await fetch(
+        `https://www.googleapis.com/blogger/v3/blogs/${encodeURIComponent(String(getByUrlData.id).trim())}`,
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            Accept: 'application/json',
+          },
+        }
+      );
+      if (getByUrlIdRes.ok) {
+        matchedBlog = await getByUrlIdRes.json();
+      }
+    } catch {}
+  }
+
+  // Fallback: If blogs.get(cleanBlogId) returned 200 directly
+  if (!matchedBlog && getBlogIdStatus === 200 && getBlogData?.id) {
+    matchedBlog = getBlogData;
+  }
+
+  // Now construct safe diagnostics
+  let explanation = '';
+  if (matchedBlog) {
+    const verifiedBlogId = String(matchedBlog.id).trim();
+    const verifiedBlogUrl = String(matchedBlog.url || normalizedUrl).trim();
+    const verifiedBlogName = String(matchedBlog.name || 'Blogger Blog').trim();
+    const postsCount = matchedBlog.posts?.totalItems ?? 0;
+
+    if (cleanBlogId && cleanBlogId !== verifiedBlogId) {
+      explanation = `Requested Blog ID "${cleanBlogId}" returned HTTP ${getBlogIdStatus}, but blog was resolved by URL / Google account to Blog ID "${verifiedBlogId}" ("${verifiedBlogName}"). Automatically using verified Blog ID.`;
+    } else if (getBlogIdStatus === 404 && verifiedBlogId === cleanBlogId) {
+      explanation = `Direct get(${cleanBlogId}) returned HTTP 404, but blog was verified in your Google account blogs list.`;
+    } else {
+      explanation = `Verified access to "${verifiedBlogName}" (${postsCount} posts).`;
+    }
+
+    const diagnostics: SafeBloggerDiagnostics = {
+      oauthAccount,
+      requestedBlogId: cleanBlogId,
+      requestedBlogUrl: normalizedUrl,
+      getBlogIdStatus,
+      getByUrlStatus,
+      listByUserStatus,
+      listByUserCount,
+      returnedBlogIds,
+      returnedBlogUrls,
+      explanation,
+    };
+
+    return {
+      success: true,
+      status: 'CONNECTED',
+      blogId: verifiedBlogId,
+      blogName: verifiedBlogName,
+      blogUrl: verifiedBlogUrl,
+      postsCount,
+      diagnostics,
+      message: explanation,
+      latencyMs: Date.now() - startTime,
+    };
+  }
+
+  // Rule 8: If listByUser does NOT contain this blog, clearly report:
+  // "The Google account used for OAuth does not have access to this Blogger blog."
+  const accountPrefix = oauthAccount ? `The Google account (${oauthAccount})` : 'The Google account';
+  const errorMessage = `${accountPrefix} used for OAuth does not have access to this Blogger blog.`;
+
+  explanation = `Verification failed: get(${cleanBlogId || 'N/A'}) returned HTTP ${getBlogIdStatus}, getByUrl returned HTTP ${getByUrlStatus}, and blogs.listByUser returned ${listByUserCount} blog(s). None matched the requested blog.`;
+
+  const diagnostics: SafeBloggerDiagnostics = {
+    oauthAccount,
+    requestedBlogId: cleanBlogId,
+    requestedBlogUrl: normalizedUrl,
+    getBlogIdStatus,
+    getByUrlStatus,
+    listByUserStatus,
+    listByUserCount,
+    returnedBlogIds,
+    returnedBlogUrls,
+    explanation,
+  };
+
+  return {
+    success: false,
+    status: 'FAILED',
+    error: errorMessage,
+    message: errorMessage,
+    diagnostics,
+    latencyMs: Date.now() - startTime,
+  };
+}
+
+// Dedicated Blogger verification endpoint called after OAuth completes
+app.post('/api/integrations/blogger/verify', async (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const { blogId, publicBlogUrl, accessToken, refreshToken, clientId, clientSecret } = req.body || {};
+    const result = await verifyBloggerConnection({
+      blogId,
+      publicBlogUrl,
+      accessToken,
+      refreshToken,
+      clientId,
+      clientSecret,
+    });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    return res.status(200).json({
+      success: false,
+      status: 'FAILED',
+      error: err?.message || 'Server error verifying Blogger connection',
+      diagnostics: {
+        oauthAccount: null,
+        requestedBlogId: String(req.body?.blogId || ''),
+        requestedBlogUrl: String(req.body?.publicBlogUrl || ''),
+        getBlogIdStatus: 500,
+        getByUrlStatus: 500,
+        listByUserStatus: 500,
+        listByUserCount: 0,
+        returnedBlogIds: [],
+        returnedBlogUrls: [],
+        explanation: err?.message || 'Server error',
+      },
+    });
+  }
+});
+
 app.post('/api/integrations/blogger/test', async (req: Request, res: Response) => {
   res.setHeader('Content-Type', 'application/json');
-  const startTime = Date.now();
   try {
     const { integration } = req.body || {};
     if (!integration) {
       return res.status(400).json({ success: false, status: 'FAILED', error: 'Missing integration payload' });
     }
 
-    const blogId = integration.blogId?.trim();
-    if (!blogId) {
-      return res.status(400).json({
-        success: false,
-        status: 'FAILED',
-        error: 'Blog ID is required.',
-        latencyMs: Date.now() - startTime,
-      });
-    }
-
-    let accessToken = integration.accessToken?.trim();
-    const clientId = integration.clientId?.trim() || process.env.BLOGGER_CLIENT_ID;
-    const clientSecret = integration.clientSecret?.trim() || process.env.BLOGGER_CLIENT_SECRET;
-    const refreshToken = integration.refreshToken?.trim() || process.env.BLOGGER_REFRESH_TOKEN;
-
-    // If refresh token exists and no fresh access token, attempt exchange
-    if (!accessToken && refreshToken && clientId && clientSecret) {
-      try {
-        const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({
-            client_id: clientId,
-            client_secret: clientSecret,
-            refresh_token: refreshToken,
-            grant_type: 'refresh_token',
-          }).toString(),
-        });
-        if (tokenRes.ok) {
-          const tokenJson = await tokenRes.json();
-          accessToken = tokenJson.access_token;
-        } else {
-          const errText = await tokenRes.text();
-          return res.status(400).json({
-            success: false,
-            status: 'FAILED',
-            latencyMs: Date.now() - startTime,
-            error: `OAuth token refresh failed: ${errText}`,
-          });
-        }
-      } catch (err: any) {
-        return res.status(400).json({
-          success: false,
-          status: 'FAILED',
-          latencyMs: Date.now() - startTime,
-          error: `Network error exchanging refresh token: ${err?.message}`,
-        });
-      }
-    }
-
-    // Now query Blogger API v3
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (accessToken) {
-      headers['Authorization'] = `Bearer ${accessToken}`;
-    }
-
-    const bloggerEndpoint = `https://www.googleapis.com/blogger/v3/blogs/${encodeURIComponent(blogId)}`;
-    const googleRes = await fetch(bloggerEndpoint, { headers });
-    const latencyMs = Date.now() - startTime;
-
-    if (!googleRes.ok) {
-      const errBody = await googleRes.json().catch(() => ({ error: { message: `HTTP ${googleRes.status}` } }));
-      const errorMsg = errBody?.error?.message || `Google Blogger API error: HTTP ${googleRes.status}`;
-      return res.status(200).json({
-        success: false,
-        status: 'FAILED',
-        latencyMs,
-        error: errorMsg,
-        details: errBody,
-      });
-    }
-
-    const blogData = await googleRes.json();
-    return res.json({
-      success: true,
-      status: 'CONNECTED',
-      latencyMs,
-      message: `Connected to blog "${blogData.name || blogId}"`,
-      blogName: blogData.name,
-      blogUrl: blogData.url,
-      postsCount: blogData.posts?.totalItems,
-      details: {
-        id: blogData.id,
-        name: blogData.name,
-        url: blogData.url,
-        published: blogData.published,
-      },
+    const result = await verifyBloggerConnection({
+      blogId: integration.blogId,
+      publicBlogUrl: integration.publicBlogUrl || integration.blogUrl,
+      accessToken: integration.accessToken,
+      refreshToken: integration.refreshToken,
+      clientId: integration.clientId,
+      clientSecret: integration.clientSecret,
     });
+    return res.status(200).json(result);
   } catch (err: any) {
     return res.status(200).json({
       success: false,
       status: 'FAILED',
-      latencyMs: Date.now() - startTime,
       error: err?.message || 'Server error testing Blogger connection',
     });
   }

@@ -20,53 +20,70 @@ export class BloggerAdapter {
    * GET https://www.googleapis.com/blogger/v3/blogs/{blogId}
    */
   public static async testConnection(integration: BloggerIntegration): Promise<IntegrationTestResult> {
-    if (!integration.blogId) {
+    const blogId = integration.blogId?.trim() || '';
+    const publicBlogUrl = (integration.publicBlogUrl || integration.blogUrl || '').trim();
+    const accessToken = integration.accessToken?.trim();
+
+    if (!blogId && !publicBlogUrl) {
       return {
-        status: 'failed',
-        message: 'Blog ID is required to connect to Blogger.',
-        error: 'Missing blogId',
+        status: 'FAILED',
+        success: false,
+        message: 'Blog ID or Public Blog URL is required to connect to Blogger.',
+        error: 'Missing blogId or publicBlogUrl',
       };
     }
 
-    if (!integration.accessToken) {
+    if (!accessToken) {
       return {
-        status: 'failed',
+        status: 'FAILED',
+        success: false,
         message: 'Blogger Access Token is missing. Please provide a valid token or connect Google OAuth.',
         error: 'Missing accessToken',
       };
     }
 
-    const cleanBlogId = integration.blogId.trim();
-    const url = `https://www.googleapis.com/blogger/v3/blogs/${cleanBlogId}`;
+    try {
+      const res = await fetch('/api/integrations/blogger/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          blogId,
+          publicBlogUrl,
+          accessToken,
+          refreshToken: integration.refreshToken?.trim(),
+          clientId: integration.clientId?.trim(),
+          clientSecret: integration.clientSecret?.trim(),
+        }),
+      });
 
-    const res = await proxyFetch({
-      url,
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${integration.accessToken.trim()}`,
-        Accept: 'application/json',
-      },
-    });
-
-    if (res.ok && res.data && res.data.id) {
-      const blogName = res.data.name || 'Blogger Blog';
-      const blogUrl = res.data.url || integration.publicBlogUrl || '';
-      const totalPosts = res.data.posts?.totalItems ?? 0;
-
+      const data = await res.json();
+      if (res.ok && data.success && data.status === 'CONNECTED') {
+        return {
+          status: 'CONNECTED',
+          success: true,
+          message: data.message || `Connected successfully to "${data.blogName || 'Blogger Blog'}"`,
+          latencyMs: data.latencyMs,
+          statusCode: 200,
+          accountInfo: `${data.blogName || 'Blogger'} - ${data.blogUrl || blogId}`,
+          details: data.diagnostics,
+        };
+      } else {
+        return {
+          status: 'FAILED',
+          success: false,
+          message: data.error || data.message || 'The Google account used for OAuth does not have access to this Blogger blog.',
+          latencyMs: data.latencyMs,
+          statusCode: data.diagnostics?.getBlogIdStatus || 404,
+          error: data.error || data.message,
+          details: data.diagnostics,
+        };
+      }
+    } catch (err: any) {
       return {
-        status: 'success',
-        message: `Connected successfully to "${blogName}" (${totalPosts} posts).`,
-        latencyMs: res.latencyMs,
-        statusCode: res.status,
-        accountInfo: `${blogName} - ${blogUrl}`,
-      };
-    } else {
-      return {
-        status: 'failed',
-        message: res.error || 'Failed to authenticate with Google Blogger API.',
-        latencyMs: res.latencyMs,
-        statusCode: res.status,
-        error: res.error,
+        status: 'FAILED',
+        success: false,
+        message: err?.message || 'Server error testing Blogger connection',
+        error: err?.message,
       };
     }
   }

@@ -97,6 +97,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         message: result.message,
         error: isSuccess ? undefined : (result.error || result.message),
       });
+      if (isSuccess) {
+        integrationStore.updateBlogger(blogger.id, {
+          connected: true,
+          lastTestStatus: 'CONNECTED',
+          lastTestMessage: result.message,
+          lastTestedAt: new Date().toISOString(),
+        });
+      } else {
+        integrationStore.updateBlogger(blogger.id, {
+          connected: false,
+          lastTestStatus: 'FAILED',
+          lastTestMessage: result.error || result.message,
+          lastTestedAt: new Date().toISOString(),
+        });
+      }
       setTestFeedback({
         id: blogger.id,
         success: isSuccess,

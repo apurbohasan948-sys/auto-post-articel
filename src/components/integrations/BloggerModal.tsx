@@ -81,59 +81,59 @@ export const BloggerModal: React.FC<BloggerModalProps> = ({ existing, onClose, o
   const [oauthError, setOauthError] = useState<string | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [showManualOptions, setShowManualOptions] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<{
+    oauthAccount: string | null;
+    requestedBlogId: string;
+    requestedBlogUrl: string;
+    getBlogIdStatus: number;
+    getByUrlStatus: number;
+    listByUserStatus: number;
+    listByUserCount: number;
+    returnedBlogIds: string[];
+    returnedBlogUrls: string[];
+    explanation?: string;
+  } | null>(null);
 
-  // Verify access to the selected Blog ID via Google Blogger API v3
+  // Verify access via Google Blogger API v3 (blogs.get, blogs.getByUrl, and blogs.listByUser)
   const verifyBlogAccess = async (
     targetBlogId: string,
-    token: string
-  ): Promise<{
-    success: boolean;
-    blogName?: string;
-    blogUrl?: string;
-    postsCount?: number;
-    error?: string;
-    details?: any;
-  }> => {
+    targetBlogUrl: string,
+    token: string,
+    tokenRefresh?: string
+  ) => {
     const cleanBlogId = targetBlogId.trim();
-    if (!cleanBlogId) {
-      return { success: false, error: 'Blogger Blog ID is required for verification.' };
+    const cleanUrl = targetBlogUrl.trim();
+    if (!cleanBlogId && !cleanUrl) {
+      return {
+        success: false,
+        status: 'FAILED',
+        error: 'Blogger Blog ID or Public Blog URL is required for verification.',
+      };
     }
 
     try {
-      const res = await proxyFetch({
-        url: `https://www.googleapis.com/blogger/v3/blogs/${encodeURIComponent(cleanBlogId)}`,
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token.trim()}`,
-          Accept: 'application/json',
-        },
+      const res = await fetch('/api/integrations/blogger/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          blogId: cleanBlogId,
+          publicBlogUrl: cleanUrl,
+          accessToken: token.trim(),
+          refreshToken: tokenRefresh?.trim() || refreshToken?.trim() || undefined,
+          clientId: clientId.trim() || undefined,
+          clientSecret:
+            clientSecretInput && clientSecretInput !== MASKED_SECRET_PLACEHOLDER
+              ? clientSecretInput.trim()
+              : undefined,
+        }),
       });
 
-      if (res.ok && res.data && res.data.id) {
-        return {
-          success: true,
-          blogName: res.data.name || 'Blogger Blog',
-          blogUrl: res.data.url || '',
-          postsCount: res.data.posts?.totalItems ?? 0,
-        };
-      } else {
-        const errorMsg =
-          res.data?.error?.message ||
-          res.error ||
-          (res.status === 404
-            ? `Blog ID "${cleanBlogId}" was not found.`
-            : res.status === 403
-            ? `Permission denied: the authenticated Google account does not have access to Blog ID "${cleanBlogId}".`
-            : `Google Blogger API error (HTTP ${res.status})`);
-        return {
-          success: false,
-          error: errorMsg,
-          details: res.data || { status: res.status },
-        };
-      }
+      const data = await res.json();
+      return data;
     } catch (err: any) {
       return {
         success: false,
+        status: 'FAILED',
         error: err?.message || 'Network request failed while verifying Blog ID',
       };
     }
@@ -143,6 +143,7 @@ export const BloggerModal: React.FC<BloggerModalProps> = ({ existing, onClose, o
   const processSuccessfulAuth = async (newAccessToken: string, newRefreshToken?: string) => {
     setIsVerifying(true);
     setOauthError(null);
+    setDiagnostics(null);
 
     if (!newAccessToken) {
       setOauthError('Authorization completed, but no access token was returned by Google.');
@@ -150,44 +151,56 @@ export const BloggerModal: React.FC<BloggerModalProps> = ({ existing, onClose, o
       return;
     }
 
-    // Automatically assign the access token without requiring manual pasting
+    // Assign the fresh access token from THIS session
     setAccessTokenInput(newAccessToken);
     if (newRefreshToken) {
       setRefreshToken(newRefreshToken);
     }
 
-    // Verify access to the selected Blog ID
-    const verifyResult = await verifyBlogAccess(blogId, newAccessToken);
+    // Verify access using the SAME authenticated OAuth access token from THIS session
+    const verifyResult = await verifyBlogAccess(
+      blogId,
+      publicBlogUrl,
+      newAccessToken,
+      newRefreshToken
+    );
 
-    if (!verifyResult.success) {
+    if (verifyResult.diagnostics) {
+      setDiagnostics(verifyResult.diagnostics);
+    }
+
+    if (!verifyResult.success || verifyResult.status !== 'CONNECTED') {
       setIsConnected(false);
       setIsVerifying(false);
-      // Return clear error without faking
-      const errDisplay = verifyResult.details
-        ? JSON.stringify(verifyResult.details, null, 2)
-        : verifyResult.error || 'Failed to verify Blog ID';
-      setOauthError(`Google OAuth authorized, but Blog ID verification failed: ${errDisplay}`);
+      const errMsg =
+        verifyResult.error ||
+        verifyResult.message ||
+        'The Google account used for OAuth does not have access to this Blogger blog.';
+      setOauthError(errMsg);
       return;
     }
 
-    // Verification succeeded
+    // Verification succeeded!
     setIsConnected(true);
     setIsVerifying(false);
 
-    const resolvedName = name.trim() || verifyResult.blogName || 'Blogger Blog';
-    const resolvedUrl = publicBlogUrl.trim() || verifyResult.blogUrl || '';
+    // Rule 6 & Rule 7: Automatically use returned verified blog ID, URL, and name
+    const resolvedBlogId = verifyResult.blogId || blogId.trim();
+    const resolvedUrl = verifyResult.blogUrl || publicBlogUrl.trim();
+    const resolvedName = verifyResult.blogName || name.trim() || 'Blogger Blog';
 
-    if (!name.trim() && verifyResult.blogName) {
-      setName(verifyResult.blogName);
-    }
-    if (!publicBlogUrl.trim() && verifyResult.blogUrl) {
-      setPublicBlogUrl(verifyResult.blogUrl);
+    setBlogId(resolvedBlogId);
+    setPublicBlogUrl(resolvedUrl);
+    if (!name.trim() || name === 'Blogger Blog') {
+      setName(resolvedName);
     }
 
-    const detailText = `Connected & verified access to "${verifyResult.blogName}" (${verifyResult.postsCount ?? 0} posts)`;
+    const detailText =
+      verifyResult.message ||
+      `Connected & verified access to "${resolvedName}" (${verifyResult.postsCount ?? 0} posts)`;
     setVerificationDetails(detailText);
 
-    // Save the resulting configuration to tara_blogger_integrations
+    // Save the resulting configuration to tara_blogger_integrations in localStorage
     const labelsArray = defaultLabels
       .split(',')
       .map((s) => s.trim())
@@ -197,7 +210,7 @@ export const BloggerModal: React.FC<BloggerModalProps> = ({ existing, onClose, o
     if (isEditing && existing) {
       const updates: Partial<BloggerIntegration> = {
         name: resolvedName,
-        blogId: blogId.trim(),
+        blogId: resolvedBlogId,
         publicBlogUrl: resolvedUrl,
         blogUrl: resolvedUrl,
         defaultLabels: labelsArray,
@@ -221,7 +234,7 @@ export const BloggerModal: React.FC<BloggerModalProps> = ({ existing, onClose, o
     } else {
       savedConfig = integrationStore.addBlogger({
         name: resolvedName,
-        blogId: blogId.trim(),
+        blogId: resolvedBlogId,
         publicBlogUrl: resolvedUrl,
         blogUrl: resolvedUrl,
         defaultLabels: labelsArray,
@@ -242,6 +255,84 @@ export const BloggerModal: React.FC<BloggerModalProps> = ({ existing, onClose, o
     }
 
     onSave(savedConfig);
+  };
+
+  // Test current connection without triggering a new OAuth popup
+  const handleTestCurrentConnection = async () => {
+    const tokenToUse =
+      accessTokenInput && accessTokenInput !== MASKED_SECRET_PLACEHOLDER
+        ? accessTokenInput
+        : existing?.accessToken || '';
+
+    if (!tokenToUse) {
+      setOauthError('No access token available. Please click "Connect Google Blogger" to authorize.');
+      return;
+    }
+
+    setIsVerifying(true);
+    setOauthError(null);
+    setDiagnostics(null);
+
+    const verifyResult = await verifyBlogAccess(
+      blogId,
+      publicBlogUrl,
+      tokenToUse,
+      refreshToken
+    );
+
+    if (verifyResult.diagnostics) {
+      setDiagnostics(verifyResult.diagnostics);
+    }
+
+    if (!verifyResult.success || verifyResult.status !== 'CONNECTED') {
+      setIsConnected(false);
+      setIsVerifying(false);
+      const errMsg =
+        verifyResult.error ||
+        verifyResult.message ||
+        'The Google account used for OAuth does not have access to this Blogger blog.';
+      setOauthError(errMsg);
+      if (existing) {
+        integrationStore.updateBlogger(existing.id, {
+          connected: false,
+          lastTestStatus: 'FAILED',
+          lastTestMessage: errMsg,
+          lastTestedAt: new Date().toISOString(),
+        });
+      }
+      return;
+    }
+
+    setIsConnected(true);
+    setIsVerifying(false);
+
+    const resolvedBlogId = verifyResult.blogId || blogId.trim();
+    const resolvedUrl = verifyResult.blogUrl || publicBlogUrl.trim();
+    const resolvedName = verifyResult.blogName || name.trim() || 'Blogger Blog';
+
+    setBlogId(resolvedBlogId);
+    setPublicBlogUrl(resolvedUrl);
+    if (!name.trim() || name === 'Blogger Blog') {
+      setName(resolvedName);
+    }
+
+    const detailText =
+      verifyResult.message ||
+      `Connected & verified access to "${resolvedName}" (${verifyResult.postsCount ?? 0} posts)`;
+    setVerificationDetails(detailText);
+
+    if (existing) {
+      integrationStore.updateBlogger(existing.id, {
+        blogId: resolvedBlogId,
+        publicBlogUrl: resolvedUrl,
+        blogUrl: resolvedUrl,
+        name: resolvedName,
+        connected: true,
+        lastTestStatus: 'CONNECTED',
+        lastTestMessage: detailText,
+        lastTestedAt: new Date().toISOString(),
+      });
+    }
   };
 
   // Start the Google OAuth 2.0 flow
@@ -592,19 +683,104 @@ export const BloggerModal: React.FC<BloggerModalProps> = ({ existing, onClose, o
                   <AlertTriangle className="w-4 h-4 shrink-0 text-red-400" />
                   <span>OAuth Connection Error</span>
                 </div>
-                <pre className="font-mono text-[11px] bg-black/40 p-2.5 rounded-lg border border-red-500/20 overflow-x-auto whitespace-pre-wrap break-all text-red-300">
+                <div className="font-mono text-[11px] bg-black/40 p-2.5 rounded-lg border border-red-500/20 text-red-300">
                   {oauthError}
-                </pre>
+                </div>
               </div>
             )}
 
-            {/* REAL CONNECT GOOGLE BLOGGER BUTTON */}
-            <div>
+            {/* Safe Google Blogger API Diagnostics */}
+            {diagnostics && (
+              <div className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-3">
+                <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                  <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5 font-mono">
+                    <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>Google Blogger API Diagnostics</span>
+                  </span>
+                  {diagnostics.oauthAccount && (
+                    <span className="text-[11px] font-mono text-cyan-300 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-500/30">
+                      Account: {diagnostics.oauthAccount}
+                    </span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-mono">
+                  <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800/80">
+                    <span className="text-slate-400 block text-[10px] uppercase">blogs.get(blogId)</span>
+                    <span
+                      className={`text-xs font-bold ${
+                        diagnostics.getBlogIdStatus === 200 ? 'text-emerald-400' : 'text-amber-400'
+                      }`}
+                    >
+                      HTTP {diagnostics.getBlogIdStatus || 'N/A'}
+                    </span>
+                    <span className="text-slate-500 block truncate text-[10px] mt-0.5">
+                      Requested: {diagnostics.requestedBlogId || 'None'}
+                    </span>
+                  </div>
+
+                  <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800/80">
+                    <span className="text-slate-400 block text-[10px] uppercase">blogs.getByUrl</span>
+                    <span
+                      className={`text-xs font-bold ${
+                        diagnostics.getByUrlStatus === 200 ? 'text-emerald-400' : 'text-amber-400'
+                      }`}
+                    >
+                      HTTP {diagnostics.getByUrlStatus || 'N/A'}
+                    </span>
+                    <span className="text-slate-500 block truncate text-[10px] mt-0.5">
+                      {diagnostics.requestedBlogUrl || 'None'}
+                    </span>
+                  </div>
+
+                  <div className="col-span-1 sm:col-span-2 bg-slate-950 p-2.5 rounded-lg border border-slate-800/80">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-400 text-[10px] uppercase">blogs.listByUser (self)</span>
+                      <span
+                        className={`font-bold text-xs ${
+                          diagnostics.listByUserCount > 0 ? 'text-emerald-400' : 'text-slate-400'
+                        }`}
+                      >
+                        {diagnostics.listByUserCount} blog{diagnostics.listByUserCount !== 1 ? 's' : ''} found (HTTP {diagnostics.listByUserStatus})
+                      </span>
+                    </div>
+                    {diagnostics.returnedBlogIds && diagnostics.returnedBlogIds.length > 0 ? (
+                      <div className="mt-2 space-y-1 text-[11px]">
+                        {diagnostics.returnedBlogIds.map((bId, idx) => (
+                          <div
+                            key={bId}
+                            className="flex items-center justify-between text-slate-300 bg-slate-900/60 px-2 py-1 rounded"
+                          >
+                            <span className="text-indigo-300 font-bold">{bId}</span>
+                            <span className="text-slate-400 truncate max-w-[260px]">
+                              {diagnostics.returnedBlogUrls[idx] || 'No URL'}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="mt-1 text-[10px] text-slate-500 italic">
+                        No Blogger blogs returned for this Google account.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {diagnostics.explanation && (
+                  <div className="text-[11px] text-slate-300 bg-slate-950/80 p-2 rounded-lg border border-slate-800 font-mono">
+                    {diagnostics.explanation}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* CONNECT & TEST BUTTONS */}
+            <div className="flex flex-col sm:flex-row items-center gap-2">
               <button
                 type="button"
                 onClick={handleConnectGoogleBlogger}
                 disabled={isConnecting || isVerifying}
-                className="w-full flex items-center justify-center gap-2.5 px-4 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer shadow-lg disabled:opacity-60 bg-white hover:bg-slate-100 text-slate-900 border border-slate-300 hover:shadow-indigo-500/10 active:scale-[0.99]"
+                className="w-full flex-1 flex items-center justify-center gap-2.5 px-4 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer shadow-lg disabled:opacity-60 bg-white hover:bg-slate-100 text-slate-900 border border-slate-300 hover:shadow-indigo-500/10 active:scale-[0.99]"
               >
                 {isConnecting ? (
                   <>
@@ -614,7 +790,7 @@ export const BloggerModal: React.FC<BloggerModalProps> = ({ existing, onClose, o
                 ) : isVerifying ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin text-slate-700" />
-                    <span>Verifying access to Blog ID "{blogId}"...</span>
+                    <span>Verifying access to Blog...</span>
                   </>
                 ) : isConnected ? (
                   <>
@@ -628,6 +804,18 @@ export const BloggerModal: React.FC<BloggerModalProps> = ({ existing, onClose, o
                   </>
                 )}
               </button>
+
+              {(accessTokenInput || existing?.accessToken) && (
+                <button
+                  type="button"
+                  onClick={handleTestCurrentConnection}
+                  disabled={isConnecting || isVerifying}
+                  className="w-full sm:w-auto px-4 py-2.5 rounded-xl text-xs font-mono font-medium transition cursor-pointer bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 disabled:opacity-60"
+                  title="Verify currently held credentials without opening Google OAuth popup"
+                >
+                  {isVerifying ? 'Verifying...' : 'Test Connection'}
+                </button>
+              )}
             </div>
 
             {/* Advanced & Manual Configuration Toggle */}
