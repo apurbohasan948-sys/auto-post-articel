@@ -28,6 +28,7 @@ import {
   TopicCandidate,
 } from '../types/agent.ts';
 import { providerStore } from './providerStore.ts';
+import { integrationStore } from './integrationStore.ts';
 
 export interface SafeApiResult<T> {
   success: boolean;
@@ -95,21 +96,22 @@ export async function safeApiCall<T>(
 
     if (!res.ok) {
       let errMsg = `HTTP ${res.status}`;
-      if (typeof parsed?.error === 'string') {
+      if (parsed?.stage && (parsed?.googleError || parsed?.error || parsed?.message)) {
+        errMsg = `[${parsed.stage}] ${parsed.googleError || parsed.error || parsed.message} (HTTP ${res.status})`;
+      } else if (typeof parsed?.error === 'string') {
         errMsg = parsed.error;
       } else if (parsed?.error?.message) {
         errMsg = parsed.error.message;
+      } else if (parsed?.googleError) {
+        errMsg = parsed.googleError;
       } else if (parsed?.message) {
         errMsg = parsed.message;
       } else {
-        errMsg = `HTTP request failed with status ${res.status}`;
+        errMsg = `Request returned HTTP ${res.status}: ${res.statusText || 'Error'}`;
       }
 
-      // If parsed contains valid result payload (such as status, error, ok, provider), retain parsed as data
-      const dataPayload = (parsed?.data ??
-        (parsed && typeof parsed === 'object' && ('status' in parsed || 'error' in parsed || 'ok' in parsed || 'status_code' in parsed)
-          ? parsed
-          : fallback)) as T;
+      // If parsed contains valid result payload (such as status, error, ok, debug), retain parsed as data
+      const dataPayload = (parsed && typeof parsed === 'object' ? parsed : fallback) as T;
 
       return {
         success: false,
@@ -322,6 +324,7 @@ export const apiClient = {
   runCycle: async (topicId?: string): Promise<{ success: boolean; job?: AgentJob; error?: string }> => {
     const enabledProviders = providerStore.getEnabledProviders();
     const tavilyConfig = providerStore.loadTavilyConfig();
+    const bloggerIntegrations = integrationStore.loadBlogger();
     const res = await safeApiCall<any>('/api/agent/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -329,6 +332,7 @@ export const apiClient = {
         topicId,
         aiProviders: enabledProviders,
         tavilyConfig,
+        bloggerIntegrations,
       }),
     });
     if (!res.success) {
@@ -417,12 +421,83 @@ export const apiClient = {
     return res.data.article;
   },
 
-  publishArticle: async (id: string): Promise<Article> => {
-    const res = await safeApiCall<any>(`/api/articles/${encodeURIComponent(id)}/publish`, { method: 'POST' });
-    if (!res.success || !res.data?.article) {
-      throw new Error(res.error || 'Publish failed');
+  publishArticle: async (id: string, options?: { isDraft?: boolean }): Promise<{ article: Article; isDraft: boolean; postId?: string; url?: string }> => {
+    const article = await apiClient.getArticle(id);
+    if (!article) {
+      throw new Error(`Article [${id}] not found.`);
     }
-    return res.data.article;
+
+    const enabledBloggers = integrationStore.getEnabledBloggers();
+    const activeBlogger = enabledBloggers[0] || integrationStore.loadBlogger()[0];
+    if (!activeBlogger || !activeBlogger.blogId) {
+      throw new Error('No active Blogger integration configured. Please configure your Blog ID and connect Google Blogger in Settings -> Integrations.');
+    }
+
+    const isDraft = typeof options?.isDraft === 'boolean' ? options.isDraft : (activeBlogger.defaultStatus === 'DRAFT');
+
+    const res = await safeApiCall<any>('/api/blogger/posts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        articleId: article.id,
+        integrationId: activeBlogger.id,
+        blogId: activeBlogger.blogId,
+        title: article.title,
+        content: article.bloggerHtml || article.cleanContent,
+        labels: article.focusKeywords && article.focusKeywords.length > 0 ? article.focusKeywords.slice(0, 5) : activeBlogger.defaultLabels,
+        isDraft,
+        integration: activeBlogger,
+      }),
+    });
+
+    if (!res.success || !res.data?.postId) {
+      const stage = res.data?.stage ? `[${res.data.stage}] ` : '';
+      const errMsg = `${stage}${res.data?.googleError || res.data?.message || res.error || 'Failed to publish post to Blogger'}`;
+      throw new Error(errMsg);
+    }
+
+    const updated = await apiClient.getArticle(id);
+    return {
+      article: updated || article,
+      isDraft,
+      postId: res.data.postId,
+      url: res.data.url,
+    };
+  },
+
+  createBloggerPost: async (payload: {
+    integrationId?: string;
+    blogId?: string;
+    title: string;
+    content: string;
+    labels?: string[];
+    isDraft?: boolean;
+    integration?: any;
+    articleId?: string;
+  }): Promise<{ success: boolean; postId?: string; url?: string; status?: string; isDraft?: boolean; error?: string }> => {
+    const res = await safeApiCall<any>('/api/blogger/posts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.success || !res.data?.postId) {
+      const err = res.error || (res.data?.stage ? `[${res.data.stage}] ${res.data?.googleError || res.data?.message}` : 'Failed to create Blogger post');
+      throw new Error(err);
+    }
+    return res.data;
+  },
+
+  testBloggerEndpoint: async (integration: any): Promise<{ success: boolean; blogId?: string; blogName?: string; blogUrl?: string; postsCount?: number; error?: string }> => {
+    const res = await safeApiCall<any>('/api/blogger/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ integration }),
+    });
+    if (!res.success) {
+      const err = res.error || (res.data?.stage ? `[${res.data.stage}] ${res.data?.googleError || res.data?.message}` : 'Blogger test failed');
+      throw new Error(err);
+    }
+    return res.data;
   },
 
   // Jobs & Logs
@@ -592,7 +667,7 @@ export const apiClient = {
       const is504 = res.statusCode === 504;
       const errorMsg = is504
         ? (res.isHtml ? 'Backend function timed out before completing the API test.' : (res.error || 'The provider did not respond before the timeout.'))
-        : (res.error || `HTTP request failed with status ${res.statusCode || 500}`);
+        : (res.error || `Provider API request returned HTTP ${res.statusCode || 500}`);
 
       resultData = {
         ok: false,
@@ -661,7 +736,7 @@ export const apiClient = {
       providerId: params.providerId || params.provider?.id || 'unknown',
       provider: params.provider?.name || 'Unknown',
       model: params.provider?.modelName || params.provider?.defaultModel || '',
-      error: res.error || `HTTP request failed with status ${res.statusCode || 500}`,
+      error: res.error || `Search API request returned HTTP ${res.statusCode || 500}`,
       timestamp: new Date().toISOString(),
     };
   },

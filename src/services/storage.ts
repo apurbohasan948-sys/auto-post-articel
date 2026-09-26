@@ -38,6 +38,10 @@ interface StoreData {
     defaultLabels: string[];
     publishingMode: 'LIVE' | 'DRAFT';
     isConnected: boolean;
+    accessToken?: string;
+    refreshToken?: string;
+    clientId?: string;
+    clientSecret?: string;
   };
   socialConfig: {
     facebookEnabled: boolean;

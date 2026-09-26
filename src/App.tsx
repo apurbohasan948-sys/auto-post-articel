@@ -361,13 +361,16 @@ export default function App() {
     }
   };
 
-  const handlePublishArticle = async (id: string) => {
+  const handlePublishArticle = async (id: string, isDraft?: boolean) => {
     setIsArticleActionLoading(true);
     try {
-      const updated = await apiClient.publishArticle(id);
-      showToast(`Published "${updated.title}" to Blogger successfully!`);
+      const res = await apiClient.publishArticle(id, typeof isDraft === 'boolean' ? { isDraft } : undefined);
+      const successMsg = res.isDraft
+        ? `Draft created successfully on Blogger! (Post ID: ${res.postId})`
+        : `Post published successfully to Blogger!`;
+      showToast(successMsg);
       if (selectedArticle && selectedArticle.id === id) {
-        setSelectedArticle(updated);
+        setSelectedArticle(res.article);
       }
       loadData();
     } catch (err: unknown) {

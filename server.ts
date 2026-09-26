@@ -15,6 +15,7 @@ import { decryptSecret, encryptSecret, maskApiKey } from './src/services/encrypt
 import { ProviderTestingService } from './src/services/providerTestingService.ts';
 import { SearchProviderManager } from './src/services/searchProvider.ts';
 import { StorageService } from './src/services/storage.ts';
+import { testBloggerIntegrationHandler, createBloggerPostHandler } from './src/services/bloggerPostingService.ts';
 
 const app = express();
 app.enable('trust proxy');
@@ -62,13 +63,17 @@ app.post('/api/agent/run', async (req: Request, res: Response) => {
     }
     const { bloggerIntegrations } = req.body || {};
     if (Array.isArray(bloggerIntegrations)) {
-      const activeBlogger = bloggerIntegrations.find((b: any) => b.enabled);
+      const activeBlogger = bloggerIntegrations.find((b: any) => b.enabled) || bloggerIntegrations[0];
       if (activeBlogger && activeBlogger.blogId) {
         storage.updateBloggerConfig({
           blogId: activeBlogger.blogId,
-          blogUrl: activeBlogger.blogUrl || '',
+          blogUrl: activeBlogger.publicBlogUrl || activeBlogger.blogUrl || '',
           isConnected: activeBlogger.lastTestStatus === 'CONNECTED',
           publishingMode: activeBlogger.defaultStatus || 'DRAFT',
+          accessToken: activeBlogger.accessToken,
+          refreshToken: activeBlogger.refreshToken,
+          clientId: activeBlogger.clientId,
+          clientSecret: activeBlogger.clientSecret,
         });
       }
     }
@@ -191,11 +196,35 @@ app.post('/api/articles/:id/approve', async (req: Request, res: Response) => {
 
 // Trigger manual publish to Blogger
 app.post('/api/articles/:id/publish', async (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'application/json');
   const article = storage.getArticleById(req.params.id);
-  if (!article) return res.status(404).json({ error: 'Article not found' });
+  if (!article) return res.status(404).json({ success: false, error: 'Article not found' });
+
+  const { integration, isDraft, blogId } = req.body || {};
+  if (integration || blogId) {
+    const postRes = await createBloggerPostHandler({
+      articleId: article.id,
+      blogId: blogId || integration?.blogId,
+      title: article.title,
+      content: article.bloggerHtml || article.cleanContent,
+      labels: article.focusKeywords && article.focusKeywords.length > 0 ? article.focusKeywords.slice(0, 5) : (integration?.defaultLabels || ['Technology', 'AI']),
+      isDraft: typeof isDraft === 'boolean' ? isDraft : false,
+      integration,
+      accessToken: integration?.accessToken,
+      refreshToken: integration?.refreshToken,
+      clientId: integration?.clientId,
+      clientSecret: integration?.clientSecret,
+    });
+
+    if (!postRes.success) {
+      return res.status(postRes.status || 400).json(postRes);
+    }
+    const updated = storage.getArticleById(req.params.id) || article;
+    return res.json({ success: true, article: updated, post: postRes });
+  }
 
   try {
-    const published = await bloggerAgent.handlePublish(article, true);
+    const published = await bloggerAgent.handlePublish(article, true, undefined, integration);
     res.json({ success: true, article: published });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1603,28 +1632,45 @@ app.post('/api/integrations/blogger/verify', async (req: Request, res: Response)
   }
 });
 
-app.post('/api/integrations/blogger/test', async (req: Request, res: Response) => {
+app.post(['/api/blogger/test', '/api/integrations/blogger/test'], async (req: Request, res: Response) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const { integration } = req.body || {};
-    if (!integration) {
-      return res.status(400).json({ success: false, status: 'FAILED', error: 'Missing integration payload' });
+    const payload = req.body?.integration || req.body || {};
+    if (!payload || (!payload.blogId && !payload.accessToken)) {
+      return res.status(400).json({
+        success: false,
+        stage: 'invalid_configuration',
+        status: 400,
+        error: 'Missing Blogger integration payload or Blog ID',
+        message: 'Missing Blogger integration payload or Blog ID',
+      });
     }
 
-    const result = await verifyBloggerConnection({
-      blogId: integration.blogId,
-      publicBlogUrl: integration.publicBlogUrl || integration.blogUrl,
-      accessToken: integration.accessToken,
-      refreshToken: integration.refreshToken,
-      clientId: integration.clientId,
-      clientSecret: integration.clientSecret,
-    });
-    return res.status(200).json(result);
+    const result = await testBloggerIntegrationHandler(payload);
+    return res.status(result.success ? 200 : (result.status || 400)).json(result);
   } catch (err: any) {
-    return res.status(200).json({
+    return res.status(500).json({
       success: false,
-      status: 'FAILED',
+      stage: 'network',
+      status: 500,
       error: err?.message || 'Server error testing Blogger connection',
+      message: err?.message || 'Server error testing Blogger connection',
+    });
+  }
+});
+
+app.post('/api/blogger/posts', async (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const result = await createBloggerPostHandler(req.body || {});
+    return res.status(result.success ? 200 : (result.status || 400)).json(result);
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      stage: 'network',
+      status: 500,
+      error: err?.message || 'Server error creating Blogger post',
+      message: err?.message || 'Server error creating Blogger post',
     });
   }
 });

@@ -5,7 +5,7 @@
  */
 
 import { BloggerIntegration, IntegrationTestResult, PublishingResult } from '../../types/integrations';
-import { proxyFetch } from '../apiClient';
+import { safeApiCall } from '../apiClient';
 
 export interface BloggerPostPayload {
   title: string;
@@ -137,33 +137,41 @@ export class BloggerAdapter {
       labels: labels.length > 0 ? labels : undefined,
     };
 
-    const res = await proxyFetch({
-      url,
+    const res = await safeApiCall<any>('/api/blogger/posts', {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${integration.accessToken.trim()}`,
         'Content-Type': 'application/json',
       },
-      body: bodyPayload,
+      body: JSON.stringify({
+        integrationId: integration.id,
+        blogId: cleanBlogId,
+        title: post.title,
+        content: post.content,
+        labels,
+        isDraft,
+        integration,
+      }),
     });
 
-    if (res.ok && res.data && res.data.id) {
+    if (res.success && res.data && res.data.postId) {
       return {
         platform: 'blogger',
         integrationId: integration.id,
         integrationName: integration.name,
         status: 'success',
-        postId: res.data.id,
-        postUrl: res.data.url || `${integration.publicBlogUrl || 'https://blogger.com'}/${res.data.id}`,
+        postId: res.data.postId,
+        postUrl: res.data.url || `${integration.publicBlogUrl || 'https://blogger.com'}/${res.data.postId}`,
         timestamp: Date.now(),
       };
     } else {
+      const stage = res.data?.stage ? `[${res.data.stage}] ` : '';
+      const errMsg = `${stage}${res.data?.googleError || res.data?.message || res.error || 'Blogger API post creation failed'}`;
       return {
         platform: 'blogger',
         integrationId: integration.id,
         integrationName: integration.name,
         status: 'failed',
-        errorMessage: res.error || `Blogger API returned HTTP ${res.status}`,
+        errorMessage: errMsg,
         timestamp: Date.now(),
       };
     }

@@ -40,6 +40,11 @@ export interface BloggerConfig {
   blogUrl: string;
   defaultLabels: string[];
   isConnected: boolean;
+  accessToken?: string;
+  refreshToken?: string;
+  clientId?: string;
+  clientSecret?: string;
+  publishingMode?: 'LIVE' | 'DRAFT';
 }
 
 export interface TopicCandidate {

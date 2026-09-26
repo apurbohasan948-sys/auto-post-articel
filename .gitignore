@@ -9,3 +9,6 @@ coverage/
 data/
 *.db
 *.sqlite
+-e 
+node-compile-cache/
+.*.hm

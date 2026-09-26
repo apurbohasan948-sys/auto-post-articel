@@ -11,6 +11,7 @@ import { decryptSecret, encryptSecret, maskApiKey } from '../../src/services/enc
 import { ProviderTestingService } from '../../src/services/providerTestingService.ts';
 import { SearchProviderManager } from '../../src/services/searchProvider.ts';
 import { StorageService } from '../../src/services/storage.ts';
+import { testBloggerIntegrationHandler, createBloggerPostHandler } from '../../src/services/bloggerPostingService.ts';
 
 export const handler = async (event: any) => {
   const storage = StorageService.getInstance();
@@ -46,7 +47,22 @@ export const handler = async (event: any) => {
 
     // Router matching
     if (path === '/agent/run' && method === 'POST') {
-      const { topicId, isManualApprovalRun, aiProviders, tavilyConfig } = body || {};
+      const { topicId, isManualApprovalRun, aiProviders, tavilyConfig, bloggerIntegrations } = body || {};
+      if (Array.isArray(bloggerIntegrations)) {
+        const activeBlogger = bloggerIntegrations.find((b: any) => b.enabled) || bloggerIntegrations[0];
+        if (activeBlogger && activeBlogger.blogId) {
+          storage.updateBloggerConfig({
+            blogId: activeBlogger.blogId,
+            blogUrl: activeBlogger.publicBlogUrl || activeBlogger.blogUrl || '',
+            isConnected: activeBlogger.lastTestStatus === 'CONNECTED',
+            publishingMode: activeBlogger.defaultStatus || 'DRAFT',
+            accessToken: activeBlogger.accessToken,
+            refreshToken: activeBlogger.refreshToken,
+            clientId: activeBlogger.clientId,
+            clientSecret: activeBlogger.clientSecret,
+          });
+        }
+      }
       if (Array.isArray(aiProviders) && aiProviders.length > 0) {
         storage.updateAIProviders(aiProviders);
       }
@@ -136,6 +152,44 @@ export const handler = async (event: any) => {
       if (!article) return { statusCode: 404, headers, body: JSON.stringify({ error: 'Not found' }) };
       const pub = await bloggerAgent.handlePublish(article, true);
       return { statusCode: 200, headers, body: JSON.stringify({ success: true, article: pub }) };
+    }
+
+    if (path.startsWith('/articles/') && path.endsWith('/publish') && method === 'POST') {
+      const id = path.split('/')[2];
+      const article = storage.getArticleById(id);
+      if (!article) return { statusCode: 404, headers, body: JSON.stringify({ success: false, error: 'Article not found' }) };
+
+      const { integration, isDraft, blogId } = body || {};
+      if (integration || blogId) {
+        const postRes = await createBloggerPostHandler({
+          articleId: article.id,
+          blogId: blogId || integration?.blogId,
+          title: article.title,
+          content: article.bloggerHtml || article.cleanContent,
+          labels: article.focusKeywords && article.focusKeywords.length > 0 ? article.focusKeywords.slice(0, 5) : (integration?.defaultLabels || ['Technology', 'AI']),
+          isDraft: typeof isDraft === 'boolean' ? isDraft : false,
+          integration,
+          accessToken: integration?.accessToken,
+          refreshToken: integration?.refreshToken,
+          clientId: integration?.clientId,
+          clientSecret: integration?.clientSecret,
+        });
+
+        const status = postRes.success ? 200 : (postRes.status || 400);
+        if (!postRes.success) {
+          return { statusCode: status, headers, body: JSON.stringify(postRes) };
+        }
+        const updated = storage.getArticleById(id) || article;
+        return { statusCode: 200, headers, body: JSON.stringify({ success: true, article: updated, post: postRes }) };
+      }
+
+      try {
+        const pub = await bloggerAgent.handlePublish(article, true, undefined, integration);
+        return { statusCode: 200, headers, body: JSON.stringify({ success: true, article: pub }) };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { statusCode: 400, headers, body: JSON.stringify({ success: false, error: msg }) };
+      }
     }
 
     if (path === '/jobs' && method === 'GET') {
@@ -932,7 +986,33 @@ export const handler = async (event: any) => {
       };
     }
 
-    if ((path === '/integrations/blogger/verify' || path === '/integrations/blogger/test') && method === 'POST') {
+    if ((path === '/blogger/test' || path === '/integrations/blogger/test') && method === 'POST') {
+      const payload = body?.integration || body || {};
+      if (!payload || (!payload.blogId && !payload.accessToken)) {
+        return {
+          statusCode: 400,
+          headers,
+          body: JSON.stringify({
+            success: false,
+            stage: 'invalid_configuration',
+            status: 400,
+            error: 'Missing Blogger integration payload or Blog ID',
+            message: 'Missing Blogger integration payload or Blog ID',
+          }),
+        };
+      }
+      const testRes = await testBloggerIntegrationHandler(payload);
+      const code = testRes.success ? 200 : (testRes.status || 400);
+      return { statusCode: code, headers, body: JSON.stringify(testRes) };
+    }
+
+    if (path === '/blogger/posts' && method === 'POST') {
+      const postRes = await createBloggerPostHandler(body || {});
+      const code = postRes.success ? 200 : (postRes.status || 400);
+      return { statusCode: code, headers, body: JSON.stringify(postRes) };
+    }
+
+    if (path === '/integrations/blogger/verify' && method === 'POST') {
       const payload = body?.integration || body || {};
       const { blogId: rawBlogId, publicBlogUrl: rawUrl, accessToken: rawToken, refreshToken: rawRefresh, clientId: customClientId, clientSecret: customClientSecret } = payload;
       let accessToken = rawToken?.trim();

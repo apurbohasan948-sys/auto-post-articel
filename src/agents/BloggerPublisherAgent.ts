@@ -17,7 +17,7 @@ export class BloggerPublisherAgent {
     this.storage = StorageService.getInstance();
   }
 
-  public async handlePublish(article: Article, isManualOverride = false, jobId?: string): Promise<Article> {
+  public async handlePublish(article: Article, isManualOverride = false, jobId?: string, integration?: any): Promise<Article> {
     const settings = this.storage.getSettings();
 
     // Check Quality Pass
@@ -53,6 +53,7 @@ export class BloggerPublisherAgent {
           labels: [...article.focusKeywords.slice(0, 3), 'Axiom AI'],
           topicId: article.topicId,
           articleId: article.id,
+          integration,
         },
         jobId
       );
